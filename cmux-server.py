@@ -3828,14 +3828,14 @@ function renderBoard() {
   statuses.forEach(st => { _prevCardRects[st] = cols[st].length; });
 }
 
-// Event delegation for board tag clicks
+// Event delegation for board tag clicks (cards + detail)
 document.getElementById('board-columns').addEventListener('click', function(e) {
   const tag = e.target.closest('.board-card-tag[data-tag]');
-  if (tag) {
-    e.stopPropagation();
-    e.preventDefault();
-    toggleBoardTag(tag.dataset.tag);
-  }
+  if (tag) { e.stopPropagation(); e.preventDefault(); toggleBoardTag(tag.dataset.tag); }
+});
+document.getElementById('board-detail-overlay').addEventListener('click', function(e) {
+  const tag = e.target.closest('.board-card-tag[data-tag]');
+  if (tag) { e.stopPropagation(); e.preventDefault(); closeBoardDetail(); toggleBoardTag(tag.dataset.tag); }
 });
 
 function _populateSessionSelect(selectId, current) {
@@ -3901,7 +3901,7 @@ function openBoardDetail(id) {
   const meta = document.getElementById('bd-meta');
   const parts = [];
   const tags = item.tags || [];
-  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" onclick="closeBoardDetail();toggleBoardTag(' + JSON.stringify(t).replace(/"/g,'&quot;') + ')">' + esc(t) + '</span>').join(' '));
+  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
   if (item.created) parts.push('Created ' + timeAgo(item.created));
   if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
   meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
@@ -4006,7 +4006,7 @@ async function boardDetailSave() {
     const meta = document.getElementById('bd-meta');
     const parts = [];
     const tags = item.tags || [];
-    if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag">' + esc(t) + '</span>').join(' '));
+    if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
     if (item.created) parts.push('Created ' + timeAgo(item.created));
     if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
     if (meta) meta.innerHTML = parts.map(p => '<div class="board-detail-meta-row">' + p + '</div>').join('');
