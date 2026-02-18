@@ -962,21 +962,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 16px; }
   h1 .dim { color: var(--dim); font-weight: 400; font-size: 0.85rem; }
 
-  /* Session cards */
-  .cards { display: grid; grid-template-columns: 1fr; gap: 10px; }
-  @media (min-width: 768px) { .cards { grid-template-columns: 1fr 1fr; } }
+  /* Session cards — list mode (default) */
+  .cards { display: flex; flex-direction: column; gap: 10px; }
 
-  /* Tile mode (desktop only) */
+  /* Grid mode (desktop only) */
   .tile-controls { display: none; }
   @media (min-width: 900px) { .tile-controls { display: flex; gap: 4px; align-items: center; } }
   .tile-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--dim); cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
   .tile-btn:hover { border-color: var(--accent); color: var(--text); }
   .tile-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
-  .cards.tile-mode { display: block; position: relative; min-height: 80vh; }
-  .cards.tile-mode .card { position: absolute; width: 340px; }
-  .cards.tile-mode .card-header { cursor: grab; }
-  .tile-dragging { box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important; z-index: 10 !important; cursor: grabbing !important; }
-  .tile-dragging .card-header { cursor: grabbing !important; }
+  @media (min-width: 900px) {
+    .cards.grid-mode { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
+  }
+  /* Sortable drag feedback */
+  .sortable-ghost { opacity: 0.25; background: var(--accent) !important; border-color: var(--accent) !important; }
+  .sortable-chosen { box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 10; }
+  .sortable-drag { opacity: 0; }
+  .cards.grid-mode .card { cursor: grab; }
+  .cards.grid-mode .card:active { cursor: grabbing; }
 
   .card {
     background: var(--card); border: 1px solid var(--border);
@@ -1915,9 +1918,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
   </div>
   <div class="tile-controls">
-    <button class="tile-btn active" id="tile-grid-btn" onclick="setTileMode('grid')" title="Grid layout">&#x25A4;</button>
-    <button class="tile-btn" id="tile-free-btn" onclick="setTileMode('tiles')" title="Free tiles">&#x2B1A;</button>
-    <button class="tile-btn" id="tile-arrange-btn" onclick="autoArrangeTiles()" title="Auto-arrange" style="display:none;">&#x2725;</button>
+    <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
+    <button class="tile-btn" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -2748,6 +2750,22 @@ function render() {
     </div>`;
   }
 
+  // Grid mode: flat list sorted by saved card order, no grouping
+  if (layoutMode === 'grid' && window.innerWidth >= 900) {
+    const orderMap = {};
+    cardOrder.forEach((name, i) => { orderMap[name] = i; });
+    const sortedFiltered = [...filtered].sort((a, b) => {
+      const ai = orderMap[a.name] !== undefined ? orderMap[a.name] : 9999;
+      const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
+      return ai - bi;
+    });
+    el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
+    for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) inp.value = val; }
+    if (focusedId) { const inp = document.getElementById(focusedId); if (inp) inp.focus({ preventScroll: true }); }
+    requestAnimationFrame(initSortable);
+    return;
+  }
+
   // Group by tag if sessions have tags and no filter is active
   const anyTagged = filtered.some(s => s.tags && s.tags.length);
   if (anyTagged && !activeTag && !q) {
@@ -2820,11 +2838,8 @@ function render() {
     if (inp) inp.focus({ preventScroll: true });
   }
 
-  // Apply tile positions after render
-  if (tileMode === 'tiles' && window.innerWidth >= 900) {
-    requestAnimationFrame(applyTilePositions);
-  }
 }
+
 
 function esc(s) {
   const d = document.createElement('div');
@@ -4185,126 +4200,63 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ═══════ DRAGGABLE TILES ═══════
-let tileMode = localStorage.getItem('amux_layout') || 'grid';
-let tilePositions = JSON.parse(localStorage.getItem('amux_tile_positions') || '{}');
-let _tileDragging = null; // {name, card, startX, startY, origX, origY}
-let _tileJustDragged = false;
+// ═══════ LAYOUT MODES (list / grid) ═══════
+let layoutMode = localStorage.getItem('amux_layout') || 'list';
+let cardOrder = JSON.parse(localStorage.getItem('amux_card_order') || '[]');
+let _sortable = null;
+let _tileJustDragged = false; // keep for toggle() guard
 
-function setTileMode(mode) {
-  tileMode = mode;
+function setLayoutMode(mode) {
+  layoutMode = mode;
   localStorage.setItem('amux_layout', mode);
-  const cards = document.querySelector('.cards');
-  if (!cards) return;
+  document.getElementById('tile-list-btn').classList.toggle('active', mode === 'list');
   document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
-  document.getElementById('tile-free-btn').classList.toggle('active', mode === 'tiles');
-  document.getElementById('tile-arrange-btn').style.display = mode === 'tiles' ? '' : 'none';
-  if (mode === 'tiles') {
-    cards.classList.add('tile-mode');
-    applyTilePositions();
-  } else {
-    cards.classList.remove('tile-mode');
-    cards.querySelectorAll('.card').forEach(c => { c.style.left = ''; c.style.top = ''; });
-  }
+  const cards = document.querySelector('.cards');
+  if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
+  if (mode !== 'grid') destroySortable();
+  render();
 }
 
-function applyTilePositions() {
+function initSortable() {
+  if (typeof Sortable === 'undefined' || window.innerWidth < 900) return;
+  destroySortable();
   const cards = document.querySelector('.cards');
   if (!cards) return;
-  const allCards = cards.querySelectorAll('.card[data-session]');
-  const cols = Math.max(1, Math.floor(cards.clientWidth / 360));
-  let maxBottom = 0;
-  allCards.forEach((card, i) => {
-    const name = card.dataset.session;
-    if (tilePositions[name]) {
-      card.style.left = tilePositions[name].x + 'px';
-      card.style.top = tilePositions[name].y + 'px';
-    } else {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      card.style.left = col * 360 + 'px';
-      card.style.top = row * 200 + 'px';
+  _sortable = Sortable.create(cards, {
+    animation: 150,
+    ghostClass: 'sortable-ghost',
+    chosenClass: 'sortable-chosen',
+    dragClass: 'sortable-drag',
+    filter: '.board-session-group, .board-session-header, button, .card-menu, textarea',
+    preventOnFilter: false,
+    delay: 80,
+    delayOnTouchOnly: true,
+    onStart: function() { _tileJustDragged = false; },
+    onEnd: function(evt) {
+      _tileJustDragged = evt.oldIndex !== evt.newIndex;
+      const allCards = cards.querySelectorAll('.card[data-session]');
+      cardOrder = Array.from(allCards).map(c => c.dataset.session);
+      localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
     }
-    const bottom = parseFloat(card.style.top) + card.offsetHeight;
-    if (bottom > maxBottom) maxBottom = bottom;
   });
-  cards.style.minHeight = (maxBottom + 40) + 'px';
 }
 
-function autoArrangeTiles() {
-  tilePositions = {};
-  localStorage.removeItem('amux_tile_positions');
-  applyTilePositions();
+function destroySortable() {
+  if (_sortable) { try { _sortable.destroy(); } catch(e) {} _sortable = null; }
 }
 
-function tileMouseDown(e, name) {
-  if (tileMode !== 'tiles' || window.innerWidth < 900) return;
-  // Only start drag from header, ignore buttons
-  if (e.target.closest('.card-menu-btn') || e.target.closest('.btn') || e.target.closest('button')) return;
-  if (e.button !== 0) return;
-  const card = e.target.closest('.card');
-  if (!card) return;
-  _tileDragging = {
-    name,
-    card,
-    startX: e.clientX,
-    startY: e.clientY,
-    origX: parseFloat(card.style.left) || 0,
-    origY: parseFloat(card.style.top) || 0,
-    moved: false,
-  };
-  e.preventDefault();
-}
+function tileMouseDown(e, name) {} // no-op — kept so card HTML doesn't break
 
-document.addEventListener('mousemove', function(e) {
-  if (!_tileDragging) return;
-  const dx = e.clientX - _tileDragging.startX;
-  const dy = e.clientY - _tileDragging.startY;
-  if (!_tileDragging.moved && Math.abs(dx) + Math.abs(dy) > 5) {
-    _tileDragging.moved = true;
-    _tileDragging.card.classList.add('tile-dragging');
-  }
-  if (_tileDragging.moved) {
-    const container = _tileDragging.card.parentElement;
-    const newX = Math.max(0, Math.min(_tileDragging.origX + dx, container.clientWidth - _tileDragging.card.offsetWidth));
-    const newY = Math.max(0, _tileDragging.origY + dy);
-    _tileDragging.card.style.left = newX + 'px';
-    _tileDragging.card.style.top = newY + 'px';
-  }
-});
-
-document.addEventListener('mouseup', function(e) {
-  if (!_tileDragging) return;
-  _tileDragging.card.classList.remove('tile-dragging');
-  if (_tileDragging.moved) {
-    _tileJustDragged = true;
-    tilePositions[_tileDragging.name] = {
-      x: parseFloat(_tileDragging.card.style.left) || 0,
-      y: parseFloat(_tileDragging.card.style.top) || 0,
-    };
-    localStorage.setItem('amux_tile_positions', JSON.stringify(tilePositions));
-    // Update container height
-    const cards = _tileDragging.card.parentElement;
-    let maxBottom = 0;
-    cards.querySelectorAll('.card').forEach(c => {
-      const b = parseFloat(c.style.top || 0) + c.offsetHeight;
-      if (b > maxBottom) maxBottom = b;
-    });
-    cards.style.minHeight = (maxBottom + 40) + 'px';
-  }
-  _tileDragging = null;
-});
-
-// Initialize tile mode on load
+// Initialize layout on load
 document.addEventListener('DOMContentLoaded', function() {
-  if (tileMode === 'tiles' && window.innerWidth >= 900) {
-    setTimeout(() => setTileMode('tiles'), 100);
+  const cards = document.querySelector('.cards');
+  if (layoutMode === 'grid' && window.innerWidth >= 900) {
+    if (cards) cards.classList.add('grid-mode');
+    document.getElementById('tile-grid-btn').classList.add('active');
+    setTimeout(initSortable, 200);
   } else {
-    // Ensure buttons reflect initial state
-    const gridBtn = document.getElementById('tile-grid-btn');
-    const freeBtn = document.getElementById('tile-free-btn');
-    if (gridBtn) gridBtn.classList.add('active');
-    if (freeBtn) freeBtn.classList.remove('active');
+    layoutMode = 'list';
+    document.getElementById('tile-list-btn').classList.add('active');
   }
 });
 
@@ -5430,6 +5382,7 @@ function forceUpdate() {
   });
 }
 </script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 </body>
 </html>"""
 
@@ -5759,7 +5712,8 @@ class CCHandler(BaseHTTPRequestHandler):
   localStorage.clear();
   location.replace('/');
 })();
-</script></body></html>"""
+</script>
+</body></html>"""
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "text/html; charset=utf-8")
