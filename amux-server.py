@@ -5056,6 +5056,10 @@ if ('serviceWorker' in navigator) {
         if (!_sseFallback && !_sse) { _sseRetries = 0; connectSSE(); }
       }
     });
+  // Auto-reload when a new SW takes control (ensures fresh HTML after update)
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    location.reload();
+  });
   }).catch(() => {});
 }
 
@@ -5489,18 +5493,35 @@ self.addEventListener('fetch', e => {
   // API requests: network only (app JS handles offline queue)
   if (url.pathname.startsWith('/api/')) return;
 
-  // Cache-first: serve from cache instantly, refresh in background
+  // Main HTML: network-first so updates always reach the client when online
+  if (url.pathname === '/') {
+    e.respondWith(
+      fetch(e.request).then(response => {
+        if (response.ok) {
+          caches.open(CACHE).then(c => c.put(e.request, response.clone()));
+        }
+        return response;
+      }).catch(() =>
+        caches.open(CACHE).then(c => c.match(e.request)).then(cached =>
+          cached || new Response('Offline — please reload when connected', {
+            status: 503, headers: { 'Content-Type': 'text/plain' }
+          })
+        )
+      )
+    );
+    return;
+  }
+
+  // Static assets (icons, manifest): cache-first, refresh in background
   e.respondWith(
     caches.open(CACHE).then(cache =>
       cache.match(e.request).then(cached => {
-        // Always try to refresh cache in background when online
         const networkUpdate = fetch(e.request).then(response => {
           if (response.ok) cache.put(e.request, response.clone());
           return response;
         }).catch(() => null);
 
         if (cached) return cached;
-        // Cache miss — wait for network
         return networkUpdate.then(r => r || new Response('Offline — please reload when connected', {
           status: 503, headers: { 'Content-Type': 'text/plain' }
         }));
