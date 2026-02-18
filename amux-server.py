@@ -1730,8 +1730,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .board-add-btn:active { border-color: var(--accent); color: var(--accent); }
   .board-empty { text-align: center; color: rgba(139,148,158,0.5); font-size: 0.78rem; padding: 20px 0; }
-  .board-card.dragging { opacity: 0.35; }
-  .board-col.drag-over { background: rgba(88,166,255,0.06); outline: 1px dashed rgba(88,166,255,0.3); }
+  .board-card { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .board-sortable-ghost { opacity: 0.25; background: rgba(88,166,255,0.15) !important; border-color: var(--accent) !important; }
+  .board-sortable-chosen { box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 10; }
+  .board-sortable-drag { opacity: 0; }
   .board-filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 6px 0 8px; align-items: center; }
   .board-filter-label { font-size: 0.68rem; color: var(--dim); white-space: nowrap; }
   .board-filter-chip {
@@ -4598,7 +4600,7 @@ function toggleSessionGroup(name) {
 function _renderBoardCard(item) {
   const tags = item.tags || [];
   const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
-  let h = '<div class="board-card" data-id="' + item.id + '" draggable="true" ondragstart="boardDragStart(event,\'' + item.id + '\')" ondragend="boardDragEnd()" onclick="openBoardDetail(\'' + item.id + '\')">';
+  let h = '<div class="board-card" data-id="' + item.id + '" onclick="openBoardDetail(\'' + item.id + '\')">';
   if (item.key) h += '<div class="board-card-key">' + esc(item.key) + '</div>';
   h += '<div class="board-card-title">';
   if (boardViewMode === 'session') h += '<span class="board-status-dot ' + (item.status || 'todo') + '"></span>';
@@ -4714,8 +4716,7 @@ function renderBoard() {
 
   let html = '';
   statuses.forEach(st => {
-    const dnd = 'ondragover="boardColDragOver(event,\'' + st + '\')" ondragleave="boardColDragLeave(event)" ondrop="boardColDrop(event,\'' + st + '\')"';
-    html += '<div class="board-col" ' + dnd + '>';
+    html += '<div class="board-col" data-col="' + st + '">';
     html += '<div class="board-col-header"><span>' + labels[st] + '</span>';
     html += '<span class="col-count" data-col="' + st + '">' + cols[st].length + '</span></div>';
     if (cols[st].length === 0) {
@@ -4730,6 +4731,30 @@ function renderBoard() {
     html += '</div>';
   });
   container.innerHTML = html;
+
+  // Init Sortable.js on each column for touch-friendly cross-column drag
+  if (typeof Sortable !== 'undefined') {
+    container.querySelectorAll('.board-col').forEach(colEl => {
+      Sortable.create(colEl, {
+        group: 'board',
+        animation: 150,
+        ghostClass: 'board-sortable-ghost',
+        chosenClass: 'board-sortable-chosen',
+        dragClass: 'board-sortable-drag',
+        filter: '.board-col-header, .board-add-btn, .board-empty',
+        preventOnFilter: false,
+        delay: 150,
+        delayOnTouchOnly: true,
+        onEnd: function(evt) {
+          const id = evt.item.dataset.id;
+          const newStatus = evt.to.dataset.col;
+          if (!id || !newStatus) return;
+          const item = boardItems.find(i => i.id === id);
+          if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
+        }
+      });
+    });
+  }
 
   // FLIP step 2: animate cards
   container.querySelectorAll('.board-card[data-id]').forEach(el => {
