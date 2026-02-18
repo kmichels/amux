@@ -3774,7 +3774,7 @@ function renderBoard() {
       if (firstLine) html += '<div class="board-card-desc">' + esc(firstLine) + ((item.desc || '').length > 80 ? '…' : '') + '</div>';
       html += '<div class="board-card-footer">';
       if (item.session) html += '<span class="board-card-session">' + esc(item.session) + '</span>';
-      tags.forEach(t => { html += '<span class="board-card-tag" onclick="event.stopPropagation();toggleBoardTag(' + JSON.stringify(t) + ')">' + esc(t) + '</span>'; });
+      tags.forEach(t => { html += '<span class="board-card-tag" onclick="event.stopPropagation();toggleBoardTag(\'' + esc(t).replace(/'/g, "\\'") + '\')">' + esc(t) + '</span>'; });
       html += '<span class="board-card-time">' + timeAgo(item.updated || item.created) + '</span>';
       html += '</div></div>';
     });
