@@ -1952,6 +1952,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
     </div>
+    <div id="server-switcher" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:0.8rem;font-weight:600;">Servers</div>
+        <button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="toggleAddServer()">+ Add</button>
+      </div>
+      <div id="add-server-form" style="display:none;margin-bottom:8px;">
+        <input id="add-server-name" class="search-input" type="text" placeholder="Label (e.g. Work laptop)" style="width:100%;margin-bottom:4px;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <input id="add-server-url" class="search-input" type="text" placeholder="https://host:8822" style="width:100%;margin-bottom:6px;font-size:0.75rem;padding:6px 8px;box-sizing:border-box;">
+        <div style="display:flex;gap:6px;justify-content:flex-end;">
+          <button class="btn" style="font-size:0.65rem;padding:2px 8px;" onclick="toggleAddServer()">Cancel</button>
+          <button class="btn" style="font-size:0.65rem;padding:2px 8px;background:var(--accent);color:#000;" onclick="saveNewServer()">Save</button>
+        </div>
+      </div>
+      <div id="server-list"></div>
+    </div>
     <div style="display:flex;gap:8px;justify-content:center;margin-top:14px;">
       <button class="btn" onclick="document.getElementById('about-overlay').classList.remove('active')">Close</button>
     </div>
@@ -4511,6 +4526,8 @@ function fmtTokens(n) {
 
 function openAbout() {
   document.getElementById('about-overlay').classList.add('active');
+  document.getElementById('add-server-form').style.display = 'none';
+  renderServerList();
   const el = document.getElementById('daily-stats');
   el.innerHTML = '<div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading...</div>';
   fetch(API + '/api/stats/daily').then(r => r.json()).then(data => {
@@ -4545,6 +4562,84 @@ function resetTokenStats() {
   fetch(API + '/api/stats/reset', { method: 'POST' }).then(r => r.json()).then(() => {
     openAbout();
   }).catch(() => showToast('Reset failed'));
+}
+
+// ═══════ SERVER SWITCHER ═══════
+function _getSavedServers() {
+  try { return JSON.parse(localStorage.getItem('cmux_servers') || '[]'); } catch(e) { return []; }
+}
+function _saveServers(list) { localStorage.setItem('cmux_servers', JSON.stringify(list)); }
+
+function renderServerList() {
+  const list = document.getElementById('server-list');
+  const servers = _getSavedServers();
+  const current = location.origin;
+  let html = '';
+  // Current server always shown first
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;background:rgba(88,166,255,0.08);margin-bottom:4px;">';
+  html += '<div style="min-width:0;flex:1;">';
+  html += '<div style="font-size:0.75rem;font-weight:600;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(location.host) + '</div>';
+  html += '<div style="font-size:0.65rem;color:var(--dim);">current</div>';
+  html += '</div></div>';
+  servers.forEach((s, i) => {
+    const isCurrent = s.url.replace(/\/+$/, '') === current;
+    if (isCurrent) return;  // skip — already shown above
+    html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:background 0.12s;" onmouseenter="this.style.background=\'rgba(255,255,255,0.04)\'" onmouseleave="this.style.background=\'none\'" onclick="switchServer(' + i + ')">';
+    html += '<div style="min-width:0;flex:1;">';
+    html += '<div style="font-size:0.75rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.name || s.url) + '</div>';
+    if (s.name) html += '<div style="font-size:0.65rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.url.replace(/^https?:\/\//, '')) + '</div>';
+    html += '</div>';
+    html += '<button class="btn" style="font-size:0.6rem;padding:1px 6px;flex-shrink:0;margin-left:8px;" onclick="event.stopPropagation();removeServer(' + i + ')">&#x2715;</button>';
+    html += '</div>';
+  });
+  if (!servers.length || servers.every(s => s.url.replace(/\/+$/, '') === current)) {
+    html += '<div style="color:var(--dim);font-size:0.7rem;text-align:center;padding:4px 0;">No other servers saved</div>';
+  }
+  list.innerHTML = html;
+}
+
+function toggleAddServer() {
+  const form = document.getElementById('add-server-form');
+  const visible = form.style.display !== 'none';
+  form.style.display = visible ? 'none' : 'block';
+  if (!visible) {
+    document.getElementById('add-server-name').value = '';
+    document.getElementById('add-server-url').value = '';
+    setTimeout(() => document.getElementById('add-server-name').focus(), 50);
+  }
+}
+
+function saveNewServer() {
+  const name = document.getElementById('add-server-name').value.trim();
+  let url = document.getElementById('add-server-url').value.trim();
+  if (!url) { showToast('URL is required'); return; }
+  // Normalize: ensure protocol, strip trailing slash
+  if (!/^https?:\/\//.test(url)) url = 'https://' + url;
+  url = url.replace(/\/+$/, '');
+  const servers = _getSavedServers();
+  // Dedupe by URL
+  if (servers.some(s => s.url.replace(/\/+$/, '') === url)) {
+    showToast('Server already saved');
+    return;
+  }
+  servers.push({ name: name || '', url });
+  _saveServers(servers);
+  document.getElementById('add-server-form').style.display = 'none';
+  renderServerList();
+  showToast('Server saved');
+}
+
+function removeServer(idx) {
+  const servers = _getSavedServers();
+  servers.splice(idx, 1);
+  _saveServers(servers);
+  renderServerList();
+}
+
+function switchServer(idx) {
+  const servers = _getSavedServers();
+  const s = servers[idx];
+  if (s) location.href = s.url;
 }
 
 function forceUpdate() {
