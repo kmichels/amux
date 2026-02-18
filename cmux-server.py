@@ -1740,6 +1740,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="chip" onclick="peekQuickKeys('C-c')">Ctrl-C</div>
         <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
         <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
+        <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
+        <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
       </div>
       <div class="ac-wrap" style="flex:1;">
         <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a command..."
@@ -2319,6 +2321,8 @@ function render() {
           <div class="chip" onclick="doKeys('${s.name}','C-c')">Ctrl-C</div>
           <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
           <div class="chip" onclick="doKeys('${s.name}','Enter')">Enter</div>
+          <div class="chip" onclick="doKeys('${s.name}','Up')">&#x2191;</div>
+          <div class="chip" onclick="doKeys('${s.name}','Down')">&#x2193;</div>
         </div>
         <div class="send-row" style="position:relative;">
           <div id="card-ac-${s.name}" class="ac-list slash-ac"></div>
