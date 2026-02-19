@@ -4204,11 +4204,14 @@ function renderPeekFiles() {
 }
 
 function removePeekFile(idx) {
+  const f = peekFiles[idx];
+  if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl);
   peekFiles.splice(idx, 1);
   renderPeekFiles();
 }
 
 function clearPeekFiles() {
+  peekFiles.forEach(f => { if (f && f.previewUrl) URL.revokeObjectURL(f.previewUrl); });
   peekFiles = [];
   renderPeekFiles();
 }
