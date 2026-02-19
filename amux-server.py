@@ -747,25 +747,60 @@ def _find_latest_session_id(work_dir: str) -> str:
     return ""
 
 
+def _project_name(work_dir: str) -> str:
+    """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
+    resolved = str(Path(work_dir).expanduser().resolve())
+    return resolved.replace("/", "-")
+
+
+def _session_mem_file(name: str) -> Path:
+    """Return the memory file for a session, keyed by its CC_DIR (not session name).
+
+    Sessions sharing the same working directory share one memory file — which is
+    correct because they're the same Claude project.
+    """
+    env_file = CC_SESSIONS / f"{name}.env"
+    if env_file.exists():
+        cfg = parse_env_file(env_file)
+        work_dir = cfg.get("CC_DIR", "").strip()
+        if work_dir:
+            return CC_MEMORY / f"{_project_name(work_dir)}.md"
+    # Fallback: name-based (e.g. session has no CC_DIR)
+    return CC_MEMORY / f"{name}.md"
+
+
 def _ensure_memory(name: str, work_dir: str):
-    """Ensure ~/.amux/memory/<name>.md exists and is symlinked into Claude's project memory path."""
-    mem_file = CC_MEMORY / f"{name}.md"
+    """Ensure a memory file exists for this project dir and is symlinked into Claude's project path.
+
+    Memory is keyed by resolved CC_DIR (not session name) so sessions sharing
+    the same directory share one memory file and never conflict on the symlink.
+    """
+    pname = _project_name(work_dir)
+    mem_file = CC_MEMORY / f"{pname}.md"
+
+    # Migrate legacy session-named file if it has content
+    old_mem_file = CC_MEMORY / f"{name}.md"
+    if old_mem_file.exists() and old_mem_file != mem_file:
+        old_content = old_mem_file.read_text(errors="replace").strip()
+        if old_content:
+            current = mem_file.read_text(errors="replace").strip() if mem_file.exists() else ""
+            if old_content not in current:
+                mem_file.write_text((current + "\n\n" + old_content).strip() + "\n")
+        old_mem_file.unlink()
+
     if not mem_file.exists():
         mem_file.write_text("")
-    # Compute Claude's project memory path for this work_dir
-    resolved = str(Path(work_dir).expanduser().resolve())
-    project_name = resolved.replace("/", "-")
-    claude_mem_dir = CLAUDE_HOME / "projects" / project_name / "memory"
+
+    # Create/repair symlink in Claude's project memory dir
+    claude_mem_dir = CLAUDE_HOME / "projects" / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
         claude_mem_dir.mkdir(parents=True, exist_ok=True)
-        # If it's already a symlink pointing to our file, nothing to do
         if claude_mem_file.is_symlink() and claude_mem_file.resolve() == mem_file.resolve():
             return
-        # If a real file exists, absorb its content into our memory file before replacing
         if claude_mem_file.exists() and not claude_mem_file.is_symlink():
-            existing = claude_mem_file.read_text().strip()
-            current = mem_file.read_text().strip()
+            existing = claude_mem_file.read_text(errors="replace").strip()
+            current = mem_file.read_text(errors="replace").strip()
             if existing and existing not in current:
                 mem_file.write_text((current + "\n\n" + existing).strip() + "\n")
             claude_mem_file.unlink()
@@ -6238,7 +6273,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 stats = get_claude_stats(cfg.get("CC_DIR", ""))
                 return self._json(stats)
             if action == "memory":
-                mem_file = CC_MEMORY / f"{name}.md"
+                mem_file = _session_mem_file(name)
                 content = mem_file.read_text(errors="replace") if mem_file.exists() else ""
                 return self._json({"content": content, "path": str(mem_file)})
             return self._json({"error": "not found"}, 404)
@@ -6261,7 +6296,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if action == "memory":
                 body = self._read_body()
                 content = body.get("content", "")
-                mem_file = CC_MEMORY / f"{name}.md"
+                mem_file = _session_mem_file(name)
                 mem_file.write_text(content)
                 return self._json({"ok": True})
             if action == "start":
