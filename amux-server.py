@@ -6701,6 +6701,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 text = body.get("text", "")
                 if not text:
                     return self._json({"error": "missing 'text'"}, 400)
+                wd = _session_work_dir(name)
+                if wd:
+                    _ensure_memory(name, wd)
                 ok, msg = send_text(name, text)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "keys":
