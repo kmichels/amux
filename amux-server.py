@@ -753,19 +753,58 @@ def _project_name(work_dir: str) -> str:
     return resolved.replace("/", "-")
 
 
-def _session_mem_file(name: str) -> Path:
-    """Return the memory file for a session, keyed by its CC_DIR (not session name).
+def _session_actual_cwd(name: str) -> str | None:
+    """Return the actual CWD of a running session's tmux pane, or None if not running."""
+    try:
+        r = subprocess.run(
+            ["tmux", "display-message", "-t", tmux_name(name), "-p", "#{pane_current_path}"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if r.returncode == 0:
+            cwd = r.stdout.strip()
+            if cwd:
+                return cwd
+    except Exception:
+        pass
+    return None
 
-    Sessions sharing the same working directory share one memory file — which is
-    correct because they're the same Claude project.
+
+def _session_mem_file(name: str) -> Path:
+    """Return the MEMORY.md file Claude is actually using for this session.
+
+    Priority:
+    1. Actual tmux pane CWD (authoritative — Claude uses whatever dir it started in)
+    2. CC_DIR from session config (for stopped sessions)
+    3. Name-based fallback
+
+    Always reads/writes Claude's own project memory dir directly so the peek
+    panel shows exactly what Claude sees, regardless of symlink state.
     """
+    # Try actual CWD from running tmux pane first
+    cwd = _session_actual_cwd(name)
+    if cwd:
+        pname = _project_name(cwd)
+        claude_mem = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+        if claude_mem.exists():
+            return claude_mem
+        # Also check our managed file
+        amux_mem = CC_MEMORY / f"{pname}.md"
+        if amux_mem.exists():
+            return amux_mem
+        return claude_mem  # return the (non-existing) path so writes go there
+
+    # Fall back to CC_DIR from config
     env_file = CC_SESSIONS / f"{name}.env"
     if env_file.exists():
         cfg = parse_env_file(env_file)
         work_dir = cfg.get("CC_DIR", "").strip()
         if work_dir:
-            return CC_MEMORY / f"{_project_name(work_dir)}.md"
-    # Fallback: name-based (e.g. session has no CC_DIR)
+            pname = _project_name(work_dir)
+            claude_mem = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
+            if claude_mem.exists():
+                return claude_mem
+            return CC_MEMORY / f"{pname}.md"
+
     return CC_MEMORY / f"{name}.md"
 
 
@@ -2182,7 +2221,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="board-detail-tab active" id="pm-tab-edit" onclick="peekMemoryTab('edit')">Edit</button>
         <button class="board-detail-tab" id="pm-tab-preview" onclick="peekMemoryTab('preview')">Preview</button>
       </div>
-      <button class="btn primary" id="peek-memory-save" onclick="savePeekMemory()">Save</button>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" id="peek-memory-sync" onclick="syncPeekMemory()" title="Ask Claude to update its memory now">Sync</button>
+        <button class="btn primary" id="peek-memory-save" onclick="savePeekMemory()">Save</button>
+      </div>
     </div>
     <textarea id="peek-memory-input" class="peek-memory-textarea"
       placeholder="No memory yet. Add notes, context, or conventions that Claude should always remember for this session..."></textarea>
@@ -3510,6 +3552,28 @@ async function savePeekMemory() {
   } catch(e) {
     save.disabled = false; save.textContent = 'Save';
     showToast('Failed to save memory');
+  }
+}
+async function syncPeekMemory() {
+  const btn = document.getElementById('peek-memory-sync');
+  btn.disabled = true; btn.textContent = 'Sending...';
+  const prompt = 'Please update your memory file now with any new facts, decisions, constraints, ' +
+    'API details, file paths, or patterns from our recent work. Be concise and add only what ' +
+    'is not already captured. Do not remove existing entries unless they are wrong.';
+  try {
+    await fetch(API + '/api/sessions/' + peekSession + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ text: prompt })
+    });
+    btn.textContent = 'Sent!';
+    showToast('Memory sync requested — switching to terminal');
+    setTimeout(() => {
+      btn.disabled = false; btn.textContent = 'Sync';
+      setPeekTab('terminal');
+    }, 1500);
+  } catch(e) {
+    btn.disabled = false; btn.textContent = 'Sync';
+    showToast('Failed to send sync request');
   }
 }
 
