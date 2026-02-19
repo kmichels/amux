@@ -5,6 +5,7 @@
 # CONFIGURATION & GLOBALS
 # ═══════════════════════════════════════════
 
+import base64
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -34,9 +36,17 @@ CC_SESSIONS = CC_HOME / "sessions"
 CC_LOGS = CC_HOME / "logs"
 CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
+CC_UPLOADS = CC_HOME / "uploads"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
+CC_UPLOADS.mkdir(parents=True, exist_ok=True)
+
+UPLOAD_ALLOWED_EXTS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".pdf", ".txt", ".md", ".csv", ".json", ".log",
+}
+UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 
@@ -1473,6 +1483,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row.open { display: flex; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
+  /* File attachment bar */
+  .peek-attach-bar { display: none; gap: 6px; padding: 4px 0 2px; flex-wrap: wrap; width: 100%; }
+  .peek-attach-bar.has-files { display: flex; }
+  .peek-attach-chip {
+    display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px 5px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 20px;
+    font-size: 0.72rem; max-width: 180px; user-select: none;
+  }
+  .peek-attach-chip.uploading { opacity: 0.55; }
+  .peek-attach-chip img { width: 24px; height: 24px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+  .peek-attach-chip .chip-icon { font-size: 1rem; line-height: 1; flex-shrink: 0; }
+  .peek-attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .peek-attach-chip .chip-remove { cursor: pointer; color: var(--dim); flex-shrink: 0; font-size: 1.1rem; line-height: 1; opacity: 0.7; }
+  .peek-attach-chip .chip-remove:hover { color: var(--red); opacity: 1; }
+  .peek-attach-btn { background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
+    display: flex; align-items: center; flex-shrink: 0; }
+  .peek-attach-btn:hover { color: var(--text); border-color: var(--accent); }
+  /* Drag-over overlay */
+  #peek-overlay.drag-over { outline: 2px dashed var(--accent); outline-offset: -3px; }
+  #peek-overlay.drag-over .peek-drag-hint {
+    display: flex !important; position: absolute; inset: 0; z-index: 200;
+    align-items: center; justify-content: center; pointer-events: none;
+    background: rgba(0,0,0,0.55); font-size: 1.3rem; color: var(--accent);
+    border-radius: 12px; font-weight: 600; letter-spacing: 0.02em;
+  }
   /* Peek tabs & memory panel */
   .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px; }
   .peek-tab { padding: 8px 14px; font-size: 0.82rem; background: none; border: none;
@@ -2203,15 +2239,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
           <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
         </div>
+        <!-- Attachment chips -->
+        <div class="peek-attach-bar" id="peek-attach-bar"></div>
+        <!-- Input row -->
         <div class="ac-wrap" style="flex:1;">
-          <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a command..."
+          <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a message or drop a file..."
             autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
             enterkeyhint="enter" style="width:100%;"
-            oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"></textarea>
+            oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"
+            onpaste="handlePeekPaste(event)"></textarea>
           <div id="slash-ac-list" class="ac-list slash-ac"></div>
         </div>
+        <input type="file" id="peek-file-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.log"
+          style="display:none" onchange="handlePeekFileInput(event)">
+        <button class="peek-attach-btn" onclick="document.getElementById('peek-file-input').click()" title="Attach file">&#128206;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
+      <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
+      <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
     </div>
   </div>
   <!-- Memory editor panel -->
@@ -3647,6 +3692,7 @@ function closePeek() {
   peekSession = null;
   peekSearchQuery = '';
   lastPeekHTML = '';
+  clearPeekFiles();
   document.getElementById('peek-overlay').classList.remove('active');
   document.body.style.overflow = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
@@ -3836,18 +3882,149 @@ function togglePeekCmd() {
   toggle.innerHTML = peekCmdOpen ? '&#x25BC; Send command' : '&#x25B2; Send command';
   if (peekCmdOpen) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
 }
+// ── File attachments ──
+let peekFiles = []; // [{name, path, url, isImage, previewUrl}]
+
+function _fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  if (['png','jpg','jpeg','gif','webp','bmp'].includes(ext)) return '🖼';
+  if (ext === 'pdf') return '📄';
+  if (['txt','md','log'].includes(ext)) return '📝';
+  if (['csv','json'].includes(ext)) return '📊';
+  return '📎';
+}
+
+function renderPeekFiles() {
+  const bar = document.getElementById('peek-attach-bar');
+  if (!bar) return;
+  bar.classList.toggle('has-files', peekFiles.length > 0);
+  bar.innerHTML = peekFiles.map((f, i) => {
+    const isUploading = !f.path;
+    let thumb = '';
+    if (f.isImage && f.previewUrl) {
+      thumb = `<img src="${f.previewUrl}" alt="">`;
+    } else {
+      thumb = `<span class="chip-icon">${_fileIcon(f.name)}</span>`;
+    }
+    return `<div class="peek-attach-chip${isUploading ? ' uploading' : ''}">
+      ${thumb}
+      <span class="chip-name">${esc(f.name)}</span>
+      ${isUploading ? '<span style="color:var(--dim);font-size:0.7rem;">↑</span>' : `<span class="chip-remove" onclick="removePeekFile(${i})">×</span>`}
+    </div>`;
+  }).join('');
+}
+
+function removePeekFile(idx) {
+  peekFiles.splice(idx, 1);
+  renderPeekFiles();
+}
+
+function clearPeekFiles() {
+  peekFiles = [];
+  renderPeekFiles();
+}
+
+async function uploadAndAttach(file) {
+  if (file.size > 20 * 1024 * 1024) { showToast('File too large (max 20 MB)'); return; }
+  const ext = '.' + file.name.split('.').pop().toLowerCase();
+  const allowed = ['.png','.jpg','.jpeg','.gif','.webp','.bmp','.pdf','.txt','.md','.csv','.json','.log'];
+  if (!allowed.includes(ext)) { showToast('Unsupported file type: ' + ext); return; }
+
+  const isImage = file.type.startsWith('image/');
+  let previewUrl = null;
+  if (isImage) previewUrl = URL.createObjectURL(file);
+
+  // Add placeholder chip while uploading
+  const placeholder = { name: file.name, path: null, url: null, isImage, previewUrl };
+  const idx = peekFiles.length;
+  peekFiles.push(placeholder);
+  renderPeekFiles();
+
+  try {
+    const buf = await file.arrayBuffer();
+    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+    const r = await fetch(API + '/api/upload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name: file.name, data: b64 })
+    });
+    const d = await r.json();
+    if (!r.ok || d.error) { showToast('Upload failed: ' + (d.error || r.status)); peekFiles.splice(idx, 1); }
+    else { peekFiles[idx] = { name: file.name, path: d.path, url: d.url, isImage, previewUrl }; }
+  } catch(e) {
+    showToast('Upload failed'); peekFiles.splice(idx, 1);
+  }
+  renderPeekFiles();
+}
+
+function handlePeekFileInput(e) {
+  for (const f of e.target.files) uploadAndAttach(f);
+  e.target.value = '';
+}
+
+function handlePeekPaste(e) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.kind === 'file') {
+      e.preventDefault();
+      uploadAndAttach(item.getAsFile());
+      return;
+    }
+  }
+}
+
+// Drag-and-drop on peek overlay
+(function() {
+  function getOverlay() { return document.getElementById('peek-overlay'); }
+  let dragCount = 0;
+  document.addEventListener('dragenter', e => {
+    if (!getOverlay()?.classList.contains('active')) return;
+    if ([...e.dataTransfer.types].includes('Files')) { dragCount++; getOverlay().classList.add('drag-over'); }
+  });
+  document.addEventListener('dragleave', e => {
+    if (!getOverlay()?.classList.contains('active')) return;
+    dragCount = Math.max(0, dragCount - 1);
+    if (dragCount === 0) getOverlay().classList.remove('drag-over');
+  });
+  document.addEventListener('dragover', e => {
+    if (getOverlay()?.classList.contains('active')) e.preventDefault();
+  });
+  document.addEventListener('drop', e => {
+    const overlay = getOverlay();
+    if (!overlay?.classList.contains('active')) return;
+    overlay.classList.remove('drag-over');
+    dragCount = 0;
+    e.preventDefault();
+    if (!document.getElementById('peek-cmd-row')?.classList.contains('open')) {
+      togglePeekCmd(); // auto-open the send bar on drop
+    }
+    for (const f of e.dataTransfer.files) uploadAndAttach(f);
+  });
+})();
+
 async function sendPeekCmd() {
   if (!peekSession) return;
   const inp = document.getElementById('peek-cmd-input');
   const text = inp.value.trim();
-  if (!text) return;
+  const files = peekFiles.filter(f => f.path); // only successfully uploaded
+  if (!text && files.length === 0) return;
+
+  // Build message: user text + file paths for Claude to read
+  let message = text;
+  if (files.length > 0) {
+    const paths = files.map(f => f.path).join('\n');
+    message = text ? `${text}\n\n${paths}` : paths;
+  }
+
   inp.value = '';
   inp.style.height = 'auto';
   delete _peekDrafts[peekSession];
-  await doSend(peekSession, text);
+  clearPeekFiles();
+
+  await doSend(peekSession, message);
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
-  // Refresh peek to show result
   setTimeout(refreshPeek, 500);
 }
 async function peekQuickSend(text) {
@@ -6158,6 +6335,61 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"path": str(p), "parent": str(p.parent) if p.parent != p else None, "entries": entries})
             except PermissionError:
                 return self._json({"error": "permission denied"}, 403)
+
+        # ── File upload ──
+        if method == "POST" and path == "/api/upload":
+            body = self._read_body()
+            filename = re.sub(r'[^a-zA-Z0-9._\-]', '_', body.get("name", "upload"))[:120]
+            ext = Path(filename).suffix.lower()
+            if ext not in UPLOAD_ALLOWED_EXTS:
+                return self._json({"error": f"unsupported file type: {ext}"}, 400)
+            raw_b64 = body.get("data", "")
+            try:
+                data = base64.b64decode(raw_b64)
+            except Exception:
+                return self._json({"error": "invalid base64"}, 400)
+            if len(data) > UPLOAD_MAX_BYTES:
+                return self._json({"error": "file too large (max 20 MB)"}, 400)
+            uid = uuid.uuid4().hex[:8]
+            save_name = f"{uid}-{filename}"
+            save_path = CC_UPLOADS / save_name
+            save_path.write_bytes(data)
+            # Purge uploads older than 24h
+            cutoff = time.time() - 86400
+            for old in CC_UPLOADS.iterdir():
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except Exception:
+                    pass
+            return self._json({"path": str(save_path), "name": filename, "url": f"/api/uploads/{save_name}"})
+
+        # ── Serve uploaded files ──
+        if method == "GET" and path.startswith("/api/uploads/"):
+            fname = path[len("/api/uploads/"):]
+            # Prevent path traversal
+            if "/" in fname or "\\" in fname or fname.startswith("."):
+                return self._json({"error": "not found"}, 404)
+            fpath = CC_UPLOADS / fname
+            if not fpath.exists():
+                return self._json({"error": "not found"}, 404)
+            ext = fpath.suffix.lower()
+            ct_map = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+                ".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8",
+                ".md": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8",
+                ".json": "application/json", ".log": "text/plain; charset=utf-8",
+            }
+            ct = ct_map.get(ext, "application/octet-stream")
+            data = fpath.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=3600")
+            self.end_headers()
+            self.wfile.write(data)
+            return
 
         # ── Board API ──
         if path == "/api/board" or path.startswith("/api/board/"):
