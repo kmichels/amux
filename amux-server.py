@@ -911,14 +911,9 @@ def list_sessions() -> list:
         preview_lines = []
         status = ""
         tinfo = tmux_info.get(tmux_name(name), {})
-        last_activity = tinfo.get("activity", 0)
-        # For stopped sessions, fall back to log file mtime, then .env mtime
-        if not last_activity:
-            lp = _log_path(name)
-            try:
-                last_activity = int((lp if lp.exists() else f).stat().st_mtime)
-            except Exception:
-                pass
+        # last_activity = when the last command was sent from the UI
+        meta = _load_meta(name)
+        last_activity = meta.get("last_send", 0)
         session_created = tinfo.get("created", 0)
         pane_title = tinfo.get("pane_title", "")
         raw = ""
@@ -958,15 +953,10 @@ def list_sessions() -> list:
         active_model = detect_active_model(raw_dir)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
-        # Token count + last-activity timestamp from JSONL cache
+        # Token count from JSONL cache
         _refresh_token_cache()
         proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
         tokens = _token_cache["data"].get(proj_key, 0)
-        # Use JSONL timestamp as last_activity when available — it reflects the actual
-        # last Claude API call, not tmux window_activity which is refreshed by UI redraws
-        claude_ts = _token_cache["timestamps"].get(proj_key, 0)
-        if claude_ts:
-            last_activity = claude_ts
         sessions.append({
             "name": name,
             "dir": resolved_dir,
@@ -7957,6 +7947,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 if wd:
                     _ensure_memory(name, wd)
                 ok, msg = send_text(name, text)
+                if ok:
+                    _update_meta(name, last_send=int(time.time()))
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "keys":
                 body = self._read_body()
@@ -7964,6 +7956,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 if not keys:
                     return self._json({"error": "missing 'keys'"}, 400)
                 ok, msg = send_keys(name, keys)
+                if ok:
+                    _update_meta(name, last_send=int(time.time()))
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
             if action == "memory":
                 body = self._read_body()
