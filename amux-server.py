@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import socket
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -363,7 +364,7 @@ def save_token_baseline(stats: dict):
 
 
 # ═══════════════════════════════════════════
-# BOARD PERSISTENCE
+# BOARD PERSISTENCE — SQLite
 # ═══════════════════════════════════════════
 
 _BOARD_FILE = CC_BOARD_DIR / "items.json"
@@ -372,6 +373,146 @@ _legacy_board = CC_HOME / "board.json"
 if _legacy_board.exists() and not _BOARD_FILE.exists():
     import shutil as _shutil
     _shutil.move(str(_legacy_board), str(_BOARD_FILE))
+
+_DB_PATH = CC_HOME / "amux.db"
+_db_local = threading.local()
+
+_DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS statuses (
+    id          TEXT PRIMARY KEY,
+    label       TEXT NOT NULL,
+    position    INTEGER NOT NULL DEFAULT 0,
+    is_builtin  INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES
+    ('todo',  'To Do',       0, 1),
+    ('doing', 'In Progress', 1, 1),
+    ('done',  'Done',        2, 1);
+CREATE TABLE IF NOT EXISTS issues (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    desc        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'todo',
+    session     TEXT,
+    creator     TEXT NOT NULL DEFAULT '',
+    due         TEXT,
+    created     INTEGER NOT NULL,
+    updated     INTEGER NOT NULL,
+    deleted     INTEGER
+);
+CREATE TABLE IF NOT EXISTS issue_tags (
+    issue_id    TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    PRIMARY KEY (issue_id, tag),
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS issue_counters (
+    prefix      TEXT PRIMARY KEY,
+    next_n      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_issues_status  ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_session ON issues(session);
+CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(updated);
+CREATE INDEX IF NOT EXISTS idx_issues_due     ON issues(due) WHERE due IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_issue_tags_tag ON issue_tags(tag);
+"""
+
+
+def get_db() -> sqlite3.Connection:
+    """Return a per-thread SQLite connection with WAL mode enabled."""
+    if not hasattr(_db_local, "conn"):
+        conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        _db_local.conn = conn
+    return _db_local.conn
+
+
+def _init_db():
+    """Create SQLite tables if they don't exist."""
+    db = get_db()
+    db.executescript(_DB_SCHEMA)
+    db.commit()
+
+
+def _load_board_raw() -> dict:
+    """Read items.json — used only for migration."""
+    if _BOARD_FILE.exists():
+        try:
+            return json.loads(_BOARD_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _migrate_flat_to_sqlite():
+    """One-time import of items.json into SQLite. Safe to call on every startup."""
+    db = get_db()
+    existing = db.execute("SELECT COUNT(*) FROM issues").fetchone()[0]
+    if existing > 0:
+        return  # already migrated
+    raw = _load_board_raw()
+    if not raw and not _BOARD_FILE.exists():
+        return  # nothing to migrate
+    # Import statuses
+    statuses = raw.get("statuses", list(_DEFAULT_STATUSES))
+    builtin_ids = {"todo", "doing", "done"}
+    existing_ids = {s["id"] for s in statuses}
+    for s in _DEFAULT_STATUSES:
+        if s["id"] not in existing_ids:
+            statuses.append(s)
+    for i, s in enumerate(statuses):
+        db.execute(
+            "INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES (?, ?, ?, ?)",
+            (s["id"], s["label"], i, 1 if s["id"] in builtin_ids else 0),
+        )
+    # Import items
+    items = raw.get("items", [])
+    counters = raw.get("counters", {})
+    now = int(time.time())
+    for item in items:
+        # Handle old id/key inconsistency: prefer key if present, else id
+        item_id = item.get("key") or item.get("id")
+        if not item_id:
+            continue
+        status = item.get("status", "todo")
+        # Ensure any unknown status exists in statuses table
+        db.execute(
+            "INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES (?, ?, 99, 0)",
+            (status, status.title()),
+        )
+        db.execute(
+            """INSERT OR IGNORE INTO issues
+               (id, title, desc, status, session, creator, due, created, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                item_id,
+                item.get("title", ""),
+                item.get("desc", ""),
+                status,
+                item.get("session") or None,
+                item.get("creator", ""),
+                item.get("due") or None,
+                item.get("created", now),
+                item.get("updated", now),
+            ),
+        )
+        for tag in item.get("tags", []):
+            if tag:
+                db.execute(
+                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+                    (item_id, tag),
+                )
+    for prefix, n in counters.items():
+        db.execute(
+            "INSERT OR IGNORE INTO issue_counters (prefix, next_n) VALUES (?, ?)",
+            (prefix, n + 1),
+        )
+    db.commit()
+    slog(f"DB migration: imported {len(items)} issues, {len(statuses)} statuses from items.json")
 
 
 def _meta_path(name: str) -> Path:
@@ -405,34 +546,78 @@ _DEFAULT_STATUSES = [
 ]
 
 
-def _load_board_raw() -> dict:
-    if _BOARD_FILE.exists():
-        try:
-            return json.loads(_BOARD_FILE.read_text())
-        except Exception:
-            pass
-    return {}
-
-
 def _load_board() -> list:
-    return _load_board_raw().get("items", [])
+    """Load all non-deleted issues from SQLite, with tags joined."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
+                  i.due, i.created, i.updated,
+                  GROUP_CONCAT(t.tag) AS tags_csv
+           FROM issues i
+           LEFT JOIN issue_tags t ON t.issue_id = i.id
+           WHERE i.deleted IS NULL
+           GROUP BY i.id
+           ORDER BY i.updated DESC"""
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        tags_csv = item.pop("tags_csv") or ""
+        item["tags"] = [t for t in tags_csv.split(",") if t]
+        result.append(item)
+    return result
 
 
 def _load_board_statuses() -> list:
-    return _load_board_raw().get("statuses", list(_DEFAULT_STATUSES))
+    """Load kanban statuses from SQLite."""
+    db = get_db()
+    rows = db.execute("SELECT id, label FROM statuses ORDER BY position").fetchall()
+    return [dict(r) for r in rows] if rows else list(_DEFAULT_STATUSES)
 
 
-def _save_board(items: list):
-    raw = _load_board_raw()
-    raw["items"] = items
-    raw.setdefault("counters", {})
-    _BOARD_FILE.write_text(json.dumps(raw))
+def _item_by_id(bid: str) -> dict | None:
+    """Fetch a single non-deleted issue by id."""
+    db = get_db()
+    row = db.execute(
+        """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
+                  i.due, i.created, i.updated,
+                  GROUP_CONCAT(t.tag) AS tags_csv
+           FROM issues i
+           LEFT JOIN issue_tags t ON t.issue_id = i.id
+           WHERE i.id = ? AND i.deleted IS NULL
+           GROUP BY i.id""",
+        (bid,),
+    ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    tags_csv = item.pop("tags_csv") or ""
+    item["tags"] = [t for t in tags_csv.split(",") if t]
+    return item
 
 
-def _save_board_statuses(statuses: list):
-    raw = _load_board_raw()
-    raw["statuses"] = statuses
-    _BOARD_FILE.write_text(json.dumps(raw))
+def _prefix_from_session(session: str) -> str:
+    """Derive issue key prefix from session name (e.g. 'my-project' → 'MP')."""
+    words = [w for w in re.split(r"[-_\s]+", session) if w] if session else []
+    if not words:
+        return "AMUX"
+    if len(words) == 1:
+        return re.sub(r"[^A-Z0-9]", "", words[0].upper())[:5] or "AMUX"
+    return re.sub(r"[^A-Z0-9]", "", "".join(w[0] for w in words).upper())[:5] or "AMUX"
+
+
+def _next_issue_id(prefix: str) -> str:
+    """Atomically get and increment the counter for a prefix; return next id."""
+    db = get_db()
+    db.execute(
+        "INSERT OR IGNORE INTO issue_counters (prefix, next_n) VALUES (?, 1)", (prefix,)
+    )
+    row = db.execute(
+        "UPDATE issue_counters SET next_n = next_n + 1 WHERE prefix = ? RETURNING next_n - 1",
+        (prefix,),
+    ).fetchone()
+    db.commit()
+    return f"{prefix}-{row[0] if row else 1}"
 
 
 def get_daily_token_stats() -> dict:
@@ -7139,130 +7324,153 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # ── Board API ──
         if path == "/api/board" or path.startswith("/api/board/"):
+            db = get_db()
+
+            # GET /api/board — list all non-deleted issues
             if method == "GET" and path == "/api/board":
                 return self._json(_load_board())
 
+            # POST /api/board — create issue
             if method == "POST" and path == "/api/board":
                 body = self._read_body()
                 title = body.get("title", "").strip()
                 if not title:
                     return self._json({"error": "missing title"}, 400)
-                raw = {}
-                if _BOARD_FILE.exists():
-                    try:
-                        raw = json.loads(_BOARD_FILE.read_text())
-                    except Exception:
-                        pass
-                items = raw.get("items", [])
-                counters = raw.get("counters", {})
                 session = body.get("session", "").strip()
-                # Build issue key from session name initials (e.g. "my-project" → "MP", "infra" → "INFRA")
-                words = [w for w in re.split(r'[-_\s]+', session) if w] if session else []
-                if not words:
-                    prefix = "AMUX"
-                elif len(words) == 1:
-                    prefix = re.sub(r'[^A-Z0-9]', '', words[0].upper())[:5] or "AMUX"
-                else:
-                    prefix = re.sub(r'[^A-Z0-9]', '', ''.join(w[0] for w in words).upper())[:5] or "AMUX"
-                n = counters.get(prefix, 0) + 1
-                counters[prefix] = n
-                item = {
-                    "id": f"{prefix}-{n}",
-                    "title": title,
-                    "desc": body.get("desc", "").strip(),
-                    "status": body.get("status", "todo"),
-                    "session": session,
-                    "tags": body.get("tags", []),
-                    "due": body.get("due", ""),
-                    "creator": body.get("creator", ""),
-                    "created": int(time.time()),
-                    "updated": int(time.time()),
-                }
-                items.append(item)
-                raw["items"] = items
-                raw["counters"] = counters
-                _BOARD_FILE.write_text(json.dumps(raw))
+                prefix = _prefix_from_session(session)
+                item_id = _next_issue_id(prefix)
+                now = int(time.time())
+                status = body.get("status", "todo")
+                due = body.get("due", "").strip() or None
+                creator = body.get("creator", "")
+                desc = body.get("desc", "").strip()
+                tags = [t for t in body.get("tags", []) if t]
+                db.execute(
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, created, updated)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, now, now),
+                )
+                for tag in tags:
+                    db.execute(
+                        "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+                        (item_id, tag),
+                    )
+                db.commit()
+                _sse_cache["board"]["time"] = 0  # invalidate SSE cache
+                item = _item_by_id(item_id)
                 return self._json(item, 201)
 
+            # POST /api/board/clear-done — soft-delete all done issues
             if method == "POST" and path == "/api/board/clear-done":
-                items = [i for i in _load_board() if i.get("status") != "done"]
-                _save_board(items)
-                return self._json({"ok": True, "remaining": len(items)})
+                now = int(time.time())
+                db.execute(
+                    "UPDATE issues SET deleted = ? WHERE status = 'done' AND deleted IS NULL", (now,)
+                )
+                db.commit()
+                _sse_cache["board"]["time"] = 0
+                remaining = db.execute(
+                    "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
+                ).fetchone()[0]
+                return self._json({"ok": True, "remaining": remaining})
 
-            # GET/POST/DELETE /api/board/statuses
+            # GET /api/board/statuses
             if path == "/api/board/statuses":
                 if method == "GET":
                     return self._json(_load_board_statuses())
+                # POST /api/board/statuses — add custom column
                 if method == "POST":
                     body = self._read_body()
                     label = body.get("label", "").strip()
                     if not label:
                         return self._json({"error": "missing label"}, 400)
-                    sid = re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')[:30]
+                    sid = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:30]
                     if not sid:
                         return self._json({"error": "invalid label"}, 400)
-                    statuses = _load_board_statuses()
-                    if any(s["id"] == sid for s in statuses):
+                    existing = [r["id"] for r in db.execute("SELECT id FROM statuses").fetchall()]
+                    if sid in existing:
                         base = sid
                         for i in range(2, 20):
-                            sid = f"{base}-{i}"
-                            if not any(s["id"] == sid for s in statuses):
+                            candidate = f"{base}-{i}"
+                            if candidate not in existing:
+                                sid = candidate
                                 break
-                    statuses.append({"id": sid, "label": label})
-                    _save_board_statuses(statuses)
+                    max_pos = db.execute("SELECT COALESCE(MAX(position),0) FROM statuses").fetchone()[0]
+                    db.execute(
+                        "INSERT OR IGNORE INTO statuses (id, label, position, is_builtin) VALUES (?, ?, ?, 0)",
+                        (sid, label, max_pos + 1),
+                    )
+                    db.commit()
                     return self._json({"id": sid, "label": label}, 201)
 
-            # DELETE /api/board/statuses/<id>
+            # DELETE/PATCH /api/board/statuses/<id>
             status_m = re.match(r"^/api/board/statuses/([a-z0-9-]+)$", path)
             if status_m:
+                sid = status_m.group(1)
                 if method == "DELETE":
-                    sid = status_m.group(1)
                     if sid in ("todo", "doing", "done"):
                         return self._json({"error": "cannot delete built-in status"}, 400)
-                    statuses = _load_board_statuses()
-                    statuses = [s for s in statuses if s["id"] != sid]
-                    _save_board_statuses(statuses)
-                    items = _load_board()
-                    for it in items:
-                        if it.get("status") == sid:
-                            it["status"] = "todo"
-                    _save_board(items)
+                    db.execute("DELETE FROM statuses WHERE id = ? AND is_builtin = 0", (sid,))
+                    db.execute(
+                        "UPDATE issues SET status = 'todo' WHERE status = ? AND deleted IS NULL", (sid,)
+                    )
+                    db.commit()
+                    _sse_cache["board"]["time"] = 0
                     return self._json({"ok": True})
                 if method == "PATCH":
-                    sid = status_m.group(1)
                     body = self._read_body()
                     label = body.get("label", "").strip()
-                    statuses = _load_board_statuses()
-                    for s in statuses:
-                        if s["id"] == sid:
-                            if label:
-                                s["label"] = label
-                            break
-                    _save_board_statuses(statuses)
+                    if label:
+                        db.execute("UPDATE statuses SET label = ? WHERE id = ?", (label, sid))
+                        db.commit()
                     return self._json({"ok": True})
 
             # PATCH/DELETE /api/board/<id>
             board_m = re.match(r"^/api/board/([A-Za-z0-9_-]+)$", path)
             if board_m:
                 bid = board_m.group(1)
-                items = _load_board()
-                idx = next((i for i, it in enumerate(items) if it["id"] == bid), None)
-                if idx is None:
+                exists = db.execute(
+                    "SELECT id FROM issues WHERE id = ? AND deleted IS NULL", (bid,)
+                ).fetchone()
+                if not exists:
                     return self._json({"error": "item not found"}, 404)
 
                 if method == "PATCH":
                     body = self._read_body()
-                    for k in ("title", "desc", "status", "session", "tags", "due"):
+                    now = int(time.time())
+                    set_clauses, params = [], []
+                    for k in ("title", "desc", "status", "session", "due"):
                         if k in body:
-                            items[idx][k] = body[k]
-                    items[idx]["updated"] = int(time.time())
-                    _save_board(items)
-                    return self._json(items[idx])
+                            set_clauses.append(f"{k} = ?")
+                            v = body[k]
+                            params.append(None if v == "" and k in ("session", "due") else v)
+                    if "creator" in body:
+                        set_clauses.append("creator = ?")
+                        params.append(body["creator"])
+                    set_clauses.append("updated = ?")
+                    params.append(now)
+                    params.append(bid)
+                    if set_clauses:
+                        db.execute(
+                            f"UPDATE issues SET {', '.join(set_clauses)} WHERE id = ?", params
+                        )
+                    if "tags" in body:
+                        db.execute("DELETE FROM issue_tags WHERE issue_id = ?", (bid,))
+                        for tag in (body["tags"] or []):
+                            if tag:
+                                db.execute(
+                                    "INSERT OR IGNORE INTO issue_tags (issue_id, tag) VALUES (?, ?)",
+                                    (bid, tag),
+                                )
+                    db.commit()
+                    _sse_cache["board"]["time"] = 0
+                    return self._json(_item_by_id(bid))
 
                 if method == "DELETE":
-                    removed = items.pop(idx)
-                    _save_board(items)
-                    return self._json({"ok": True, "deleted": removed["id"]})
+                    now = int(time.time())
+                    db.execute("UPDATE issues SET deleted = ? WHERE id = ?", (now, bid))
+                    db.commit()
+                    _sse_cache["board"]["time"] = 0
+                    return self._json({"ok": True, "deleted": bid})
 
             return self._json({"error": "not found"}, 404)
 
@@ -7304,6 +7512,36 @@ class CCHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(ical_text.encode("utf-8"))
             return
+
+        # GET /api/sync?since=<unix_seconds> — delta sync for offline clients
+        if method == "GET" and path == "/api/sync":
+            since = int(qs.get("since", ["0"])[0] or "0")
+            db = get_db()
+            rows = db.execute(
+                """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
+                          i.due, i.created, i.updated, i.deleted,
+                          GROUP_CONCAT(t.tag) AS tags_csv
+                   FROM issues i
+                   LEFT JOIN issue_tags t ON t.issue_id = i.id
+                   WHERE i.updated > ? OR (i.deleted IS NOT NULL AND i.deleted > ?)
+                   GROUP BY i.id""",
+                (since, since),
+            ).fetchall()
+            issues = []
+            for row in rows:
+                item = dict(row)
+                tags_csv = item.pop("tags_csv") or ""
+                item["tags"] = [t for t in tags_csv.split(",") if t]
+                issues.append(item)
+            statuses = [
+                dict(r)
+                for r in db.execute("SELECT id, label, position FROM statuses ORDER BY position").fetchall()
+            ]
+            return self._json({
+                "ts": int(time.time()),
+                "issues": issues,
+                "statuses": statuses,
+            })
 
         # GET /api/tmux-sessions (unregistered tmux sessions)
         if method == "GET" and path == "/api/tmux-sessions":
@@ -7809,6 +8047,10 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8822
     lan_ip = get_lan_ip()
     no_tls = "--no-tls" in sys.argv
+
+    # Initialize SQLite and migrate flat-file data on first run
+    _init_db()
+    _migrate_flat_to_sqlite()
 
     server = ThreadingHTTPServer(("0.0.0.0", port), CCHandler)
 
