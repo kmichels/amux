@@ -4995,6 +4995,7 @@ document.addEventListener('DOMContentLoaded', function() {
 let activeView = 'sessions';
 let boardItems = [];
 let boardStatuses = [{id:'todo',label:'To Do'},{id:'doing',label:'In Progress'},{id:'done',label:'Done'}];
+let _boardSortables = [];
 let boardTimer = null;
 let boardEditId = null;
 let boardEditStatus = 'todo';
@@ -5363,8 +5364,10 @@ function renderBoard() {
 
   // Init Sortable.js on each column for touch-friendly cross-column drag
   if (typeof Sortable !== 'undefined') {
+    _boardSortables.forEach(s => { try { s.destroy(); } catch(e) {} });
+    _boardSortables = [];
     container.querySelectorAll('.board-col').forEach(colEl => {
-      Sortable.create(colEl, {
+      _boardSortables.push(Sortable.create(colEl, {
         group: 'board',
         animation: 150,
         ghostClass: 'board-sortable-ghost',
@@ -5381,7 +5384,7 @@ function renderBoard() {
           const item = boardItems.find(i => i.id === id);
           if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
         }
-      });
+      }));
     });
   }
 
