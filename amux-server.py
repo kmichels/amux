@@ -818,6 +818,11 @@ def _detect_claude_status(raw_output: str) -> str:
         # Multi-choice / AskUserQuestion prompt
         if "enter to select" in sl:
             return "waiting"
+        # Manual tool approval prompt ("Do you want to proceed? ❯ 1. Yes")
+        if "do you want to proceed" in sl:
+            return "waiting"
+        if re.match(r".*\u276f\s*\d+\.", s):  # ❯ 1. Yes / ❯ 2. No selector
+            return "waiting"
         # "Interrupted" with follow-up question
         if "interrupted" in sl and "what should claude do" in sl:
             return "waiting"
@@ -833,10 +838,14 @@ def _detect_claude_status(raw_output: str) -> str:
         # Status bar visible but no active/waiting signal → idle at prompt
         return "idle"
 
-    # ── 4. Fallback: check for prompt character ──
-    tail = "\n".join(lines[-5:])
-    if "\u276f" in tail or "$ " in tail:
-        return "idle"
+    # ── 4. Fallback: check for shell prompt character ──
+    # Only treat ❯ as a shell prompt when it's at the end of a line (not ❯ 1. Yes selector)
+    for l in lines[-5:]:
+        ls = l.strip()
+        if ls.endswith("\u276f") or ls == "\u276f":
+            return "idle"
+        if "$ " in ls and not ls.startswith("❯"):
+            return "idle"
     return ""
 
 
