@@ -7370,19 +7370,6 @@ class CCHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length))
 
     def _route(self, method: str):
-        # Redirect raw-IP requests to Tailscale hostname (cert only covers hostname)
-        ts = getattr(self.server, "ts_hostname", "")
-        if ts:
-            host = self.headers.get("Host", "")
-            host_name = host.rsplit(":", 1)[0] if ":" in host else host
-            if host_name and host_name != ts and host_name not in ("localhost", "127.0.0.1"):
-                port = self.server.server_address[1]
-                target = f"https://{ts}:{port}{self.path}"
-                self.send_response(301)
-                self.send_header("Location", target)
-                self.end_headers()
-                return
-
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
@@ -7397,16 +7384,7 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /
         if method == "GET" and path == "/":
-            ts = getattr(self.server, "ts_hostname", "")
-            if ts:
-                html = DASHBOARD_HTML.replace("const API = '';",
-                    "const API = '';\n"
-                    "const _TS_HOSTNAME = '" + ts + "';\n"
-                    "if(_TS_HOSTNAME && location.hostname !== _TS_HOSTNAME && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1'){"
-                    "location.replace(location.protocol+'//'+_TS_HOSTNAME+':'+location.port+location.pathname+location.search);}", 1)
-            else:
-                html = DASHBOARD_HTML
-            return self._html(html)
+            return self._html(DASHBOARD_HTML)
 
         # GET /clear — unregister SW + wipe caches, then redirect to /
         if method == "GET" and path == "/clear":
@@ -8525,7 +8503,6 @@ def main():
                         sock.context = fb_ctx
                 ctx.sni_callback = _sni_cb
             server.ssl_ctx = ctx  # per-connection TLS in process_request_thread()
-            server.ts_hostname = ts_hostname  # for IP→hostname redirect
             scheme = "https"
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
