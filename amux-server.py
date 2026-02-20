@@ -7817,6 +7817,21 @@ class CCHandler(BaseHTTPRequestHandler):
 
             return self._json({"error": "not found"}, 404)
 
+        # GET /api/cert — download TLS cert for manual trust on mobile
+        if method == "GET" and path == "/api/cert":
+            cert_path = TLS_DIR / "cert.pem"
+            if not cert_path.exists():
+                return self._json({"error": "no cert"}, 404)
+            body = cert_path.read_bytes()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/x-pem-file")
+            self.send_header("Content-Disposition", "attachment; filename=\"amux.pem\"")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # GET /api/calendar.ics — iCal subscription feed
         if method == "GET" and path == "/api/calendar.ics":
             items = [i for i in _load_board() if i.get("due")]
