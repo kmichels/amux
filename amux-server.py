@@ -2676,7 +2676,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* ═══ Grid Mode ═══ */
   #grid-view {
-    display: none; position: fixed; inset: 0; z-index: 400;
+    display: none; position: fixed; top: 56px; left: 0; right: 0; bottom: 0; z-index: 39;
     background: #0a0d12; flex-direction: column;
   }
   #grid-view.active { display: flex; }
@@ -2696,6 +2696,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .gp-chip:hover { background: var(--hover); color: var(--text); }
   .gp-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .ws-profile-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 3px 8px; border-radius: 10px; font-size: 0.73rem; cursor: pointer;
+    border: 1px solid var(--accent); background: rgba(88,166,255,0.08); color: var(--accent);
+    white-space: nowrap; flex-shrink: 0; transition: all 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .ws-profile-chip:hover { background: rgba(88,166,255,0.2); }
+  .ws-profile-del {
+    background: none; border: none; color: inherit; opacity: 0.5; cursor: pointer;
+    padding: 0 0 0 2px; font-size: 0.7rem; line-height: 1;
+  }
+  .ws-profile-del:hover { opacity: 1; }
   #gridstack-container { flex: 1; overflow-y: auto; padding: 4px; }
   .gp-header {
     display: flex; align-items: center; padding: 0 10px; gap: 8px;
@@ -5837,21 +5850,23 @@ document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
     return;
   }
-  // Cmd/Ctrl+V when not in an editable: paste manually via clipboard API.
-  // In macOS desktop PWAs the 'paste' DOM event never fires when focus is on a
-  // non-editable element, even after calling inp.focus(). So we read the
-  // clipboard ourselves and insert the text programmatically.
+  // Cmd/Ctrl+V — always intercept and use clipboard.readText().
+  // In macOS desktop PWAs the native 'paste' event never fires even when focus
+  // IS on an editable element (confirmed via devtools: TEXTAREA#input-* editable=true,
+  // defaultPrevented stays false, but no paste event fires). We must handle
+  // paste ourselves in all cases.
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'v') {
-    const ae = document.activeElement;
-    const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
-    if (!inInput) {
+    if (navigator.clipboard && navigator.clipboard.readText) {
       e.preventDefault();
+      const ae = document.activeElement;
       const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
       const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
-      const inp = peekOpen ? document.getElementById('peek-cmd-input')
+      // Use focused editable as target; fall back to best contextual input
+      let inp = (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ? ae
+        : peekOpen ? document.getElementById('peek-cmd-input')
         : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
         : document.querySelector('.card.open .send-input') || document.getElementById('search');
-      if (inp && navigator.clipboard && navigator.clipboard.readText) {
+      if (inp) {
         navigator.clipboard.readText().then(text => {
           if (!text) return;
           inp.focus({ preventScroll: true });
@@ -5862,13 +5877,13 @@ document.addEventListener('keydown', (e) => {
           inp.dispatchEvent(new Event('input', { bubbles: true }));
           if (typeof autoGrow === 'function') autoGrow(inp);
         }).catch(() => {
-          // Clipboard API denied — fall back to focusing so a manual paste can land
+          // Clipboard read denied — try execCommand fallback
           inp.focus({ preventScroll: true });
+          try { document.execCommand('paste'); } catch(_) {}
         });
-      } else if (inp) {
-        inp.focus({ preventScroll: true });
       }
     }
+    // If clipboard API not available, don't preventDefault — browser handles natively
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
   if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
@@ -7095,11 +7110,18 @@ function _gpSafeId(name) {
 
 function enterGridMode() {
   const view = document.getElementById('grid-view');
+  // Position below the sticky header so the header remains visible
+  const header = document.querySelector('.header-row');
+  if (header) {
+    const rect = header.getBoundingClientRect();
+    view.style.top = rect.bottom + 'px';
+  }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
   ['sessions','board','calendar'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
+  _wsRenderProfileBar();
   if (!_grid) {
     _grid = GridStack.init({
       cellHeight: 60,
@@ -7211,6 +7233,74 @@ function _gridRestoreLayout() {
         addGridPane(item.id, item.x, item.y, item.w, item.h);
     });
   } catch(e) {}
+}
+
+// ── Workspace Profiles (device-scoped) ──
+function _wsDeviceId() {
+  let id = localStorage.getItem('amux_device_id');
+  if (!id) {
+    id = 'dev-' + Math.random().toString(36).slice(2, 10) + '-' + Date.now().toString(36);
+    localStorage.setItem('amux_device_id', id);
+  }
+  return id;
+}
+
+function _wsProfilesKey() { return 'amux_ws_profiles_' + _wsDeviceId(); }
+
+function _wsLoadProfiles() {
+  try { return JSON.parse(localStorage.getItem(_wsProfilesKey()) || '{}'); } catch(e) { return {}; }
+}
+
+function _wsSaveProfiles(profiles) {
+  localStorage.setItem(_wsProfilesKey(), JSON.stringify(profiles));
+}
+
+function wsSaveProfile() {
+  const name = prompt('Profile name:');
+  if (!name || !name.trim()) return;
+  if (!_grid) return;
+  const layout = _grid.save(false);
+  const profiles = _wsLoadProfiles();
+  profiles[name.trim()] = layout;
+  _wsSaveProfiles(profiles);
+  _wsRenderProfileBar();
+}
+
+function wsLoadProfile(name) {
+  const profiles = _wsLoadProfiles();
+  const layout = profiles[name];
+  if (!layout) return;
+  // Clear current panes
+  Object.keys(_gridPanes).forEach(n => removeGridPane(n));
+  // Load profile panes
+  layout.forEach(item => {
+    if (item.id && (sessions || []).find(s => s.name === item.id))
+      addGridPane(item.id, item.x, item.y, item.w, item.h);
+  });
+  _wsRenderProfileBar();
+}
+
+function wsDeleteProfile(name) {
+  const profiles = _wsLoadProfiles();
+  delete profiles[name];
+  _wsSaveProfiles(profiles);
+  _wsRenderProfileBar();
+}
+
+function _wsRenderProfileBar() {
+  const el = document.getElementById('ws-profile-bar');
+  if (!el) return;
+  const profiles = _wsLoadProfiles();
+  const names = Object.keys(profiles);
+  if (!names.length) {
+    el.innerHTML = '<span style="font-size:0.7rem;color:var(--dim);opacity:0.5;">No saved profiles</span>';
+    return;
+  }
+  el.innerHTML = names.map(n => {
+    const safe = n.replace(/'/g, "\\'");
+    return `<span class="ws-profile-chip" onclick="wsLoadProfile('${safe}')">${esc(n)
+      }<button class="ws-profile-del" onclick="event.stopPropagation();wsDeleteProfile('${safe}')" title="Delete">&#x2715;</button></span>`;
+  }).join('');
 }
 
 async function sendGridCmd(name) {
@@ -8076,6 +8166,8 @@ function forceUpdate() {
   <div class="grid-toolbar">
     <span class="grid-toolbar-title">Workspace</span>
     <div id="grid-chips"></div>
+    <div id="ws-profile-bar" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:4px;"></div>
+    <button class="btn" onclick="wsSaveProfile()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;" title="Save current layout as a profile">&#x2B; Save</button>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
   </div>
   <div id="gridstack-container">
