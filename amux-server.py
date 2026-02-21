@@ -5258,7 +5258,7 @@ function toggleTagFilter(tag) {
 }
 function toggleTagGroup(tag) {
   _tagGroupCollapsed[tag] = !_tagGroupCollapsed[tag];
-  localStorage.setItem('amux_tag_collapsed_v2', JSON.stringify(_tagGroupCollapsed));
+  localStorage.setItem('amux_status_collapsed', JSON.stringify(_tagGroupCollapsed));
   render();
 }
 function clearSearch() {
@@ -6025,7 +6025,7 @@ let boardSearchQuery = '';
 let _boardDragId = null;
 let boardViewMode = localStorage.getItem('amux_board_view') || 'session';
 let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collapsed') || '{}');
-let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_tag_collapsed_v2') || '{}');
+let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_status_collapsed') || '{}');
 let _collapsedCols = new Set(JSON.parse(localStorage.getItem('amux_col_collapsed') || '[]'));
 
 const _BUILT_IN_STATUS_STYLE = {
