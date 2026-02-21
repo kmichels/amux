@@ -5897,8 +5897,10 @@ function _pwaCb(e) {
   }
 
   // Cmd+V — paste into best available input
-  if (k === 'v' && navigator.clipboard?.readText) {
-    e.preventDefault();
+  // Use execCommand('paste') first — it's synchronous, requires no permission prompt,
+  // and works from a trusted keydown event. Fall back to clipboard.readText() only if
+  // execCommand fails (execCommand triggers the browser "Paste" confirmation UI).
+  if (k === 'v') {
     const peekOpen  = document.getElementById('peek-overlay')?.classList.contains('active');
     const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
     const gridOpen  = document.getElementById('grid-view')?.classList.contains('active');
@@ -5909,21 +5911,21 @@ function _pwaCb(e) {
       || document.querySelector('.card.open .send-input')
       || document.getElementById('search');
     if (target) {
-      navigator.clipboard.readText().then(text => {
-        if (!text) return;
-        target.focus({ preventScroll: true });
-        const s = target.selectionStart ?? target.value.length;
-        const en = target.selectionEnd ?? target.value.length;
-        target.value = target.value.slice(0, s) + text + target.value.slice(en);
-        target.selectionStart = target.selectionEnd = s + text.length;
-        target.dispatchEvent(new Event('input', { bubbles: true }));
-        if (typeof autoGrow === 'function') autoGrow(target);
-      }).catch(() => {
-        target.focus({ preventScroll: true });
-        try { document.execCommand('paste'); } catch(_) {}
-      });
+      e.preventDefault();
+      target.focus({ preventScroll: true });
+      if (!document.execCommand('paste') && navigator.clipboard?.readText) {
+        navigator.clipboard.readText().then(text => {
+          if (!text) return;
+          const s = target.selectionStart ?? target.value.length;
+          const en = target.selectionEnd ?? target.value.length;
+          target.value = target.value.slice(0, s) + text + target.value.slice(en);
+          target.selectionStart = target.selectionEnd = s + text.length;
+          target.dispatchEvent(new Event('input', { bubbles: true }));
+          if (typeof autoGrow === 'function') autoGrow(target);
+        }).catch(() => {});
+      }
+      return true;
     }
-    return true;
   }
 
   return false;
