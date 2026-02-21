@@ -1383,7 +1383,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack.min.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -7473,7 +7473,7 @@ function forceUpdate() {
 }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/gridstack@10/dist/gridstack-all.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
     <span class="grid-toolbar-title">Grid</span>
