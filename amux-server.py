@@ -2309,14 +2309,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-columns {
     display: flex; gap: 12px; overflow-x: scroll;
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
-    min-height: 200px; touch-action: pan-x;
+    min-height: 200px; touch-action: pan-x pan-y;
   }
   .board-columns::-webkit-scrollbar { display: none; }
   .board-col {
     flex: 1; min-width: 200px; max-width: 320px;
     display: flex; flex-direction: column; gap: 6px;
     background: rgba(255,255,255,0.02); border-radius: 10px; padding: 10px 8px;
-    min-height: 80px; touch-action: pan-x;
+    min-height: 80px; touch-action: pan-x pan-y;
   }
   .board-col-header {
     font-size: 0.72rem; font-weight: 600; color: var(--dim);
