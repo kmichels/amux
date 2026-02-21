@@ -2826,6 +2826,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
     <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by status" style="font-size:0.75rem;font-weight:700;">#</button>
     <button class="tile-btn tile-grid-only" id="tile-grid-btn" onclick="setLayoutMode('grid')" title="Grid view">&#x268F;</button>
+    <button class="tile-btn" id="tile-reset-btn" onclick="resetCardOrder()" title="Reset to default order (pinned → last active)" style="display:none;font-size:0.8rem;">&#x21BA;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -3925,18 +3926,26 @@ function render() {
   } else {
     // list mode (flat) or group mode with active filter: flat list
     let flatList = filtered;
-    if (layoutMode === 'list' && cardOrder.length && !activeTag && !q) {
-      const orderMap = {};
-      cardOrder.forEach((n, i) => { orderMap[n] = i; });
-      flatList = [...filtered].sort((a, b) => {
-        const ai = orderMap[a.name] !== undefined ? orderMap[a.name] : 9999;
-        const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
-        return ai - bi;
-      });
+    if (layoutMode === 'list' && !activeTag && !q) {
+      if (cardOrder.length) {
+        const orderMap = {};
+        cardOrder.forEach((n, i) => { orderMap[n] = i; });
+        flatList = [...filtered].sort((a, b) => {
+          const ai = orderMap[a.name];
+          const bi = orderMap[b.name];
+          if (ai !== undefined && bi !== undefined) return ai - bi;
+          if (ai !== undefined) return -1; // ordered before unordered
+          if (bi !== undefined) return 1;
+          return _naturalSortSessions(a, b); // new sessions: natural order
+        });
+      } else {
+        flatList = [...filtered].sort(_naturalSortSessions);
+      }
     }
     el.innerHTML = draftCards + flatList.map(_renderSessionCard).join('');
     if (layoutMode === 'list') requestAnimationFrame(initSortable);
   }
+  _updateResetBtn();
 
   // Restore input values and focus after re-rendering
   for (const [id, val] of Object.entries(savedInputs)) {
@@ -5916,6 +5925,24 @@ let cardOrder = JSON.parse(localStorage.getItem('amux_card_order') || '[]');
 let _sortable = null;
 let _tileJustDragged = false; // keep for toggle() guard
 
+// Natural sort: pinned first, then most recently active
+function _naturalSortSessions(a, b) {
+  if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+  return (b.last_activity || 0) - (a.last_activity || 0);
+}
+
+function resetCardOrder() {
+  cardOrder = [];
+  localStorage.removeItem('amux_card_order');
+  _updateResetBtn();
+  render();
+}
+
+function _updateResetBtn() {
+  const btn = document.getElementById('tile-reset-btn');
+  if (btn) btn.style.display = (layoutMode === 'list' && cardOrder.length > 0) ? '' : 'none';
+}
+
 function setLayoutMode(mode) {
   layoutMode = mode;
   localStorage.setItem('amux_layout', mode);
@@ -5926,6 +5953,7 @@ function setLayoutMode(mode) {
   if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
   if (mode === 'group') destroySortable();
   render();
+  _updateResetBtn();
 }
 
 function initSortable() {
@@ -5951,6 +5979,7 @@ function initSortable() {
       const allCards = cards.querySelectorAll('.card[data-session]');
       cardOrder = Array.from(allCards).map(c => c.dataset.session);
       localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
+      _updateResetBtn();
       console.log('[amux:drag] onEnd', { session: evt.item?.dataset?.session, oldIndex: evt.oldIndex, newIndex: evt.newIndex, moved: _tileJustDragged, cardOrder });
     }
   });
