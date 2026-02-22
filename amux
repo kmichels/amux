@@ -536,8 +536,9 @@ try { pw = require('playwright'); } catch(e) {
 })().catch(e => { console.error(e.message); process.exit(1); });
 JSEOF
       echo ""
-      echo "${GREEN}✓${RESET} Auth profile saved to: $profile_dir"
-      echo "  Run ${BOLD}amux playwright-auth sync${RESET} to upload to cloud."
+      echo "${GREEN}✓${RESET} Auth profile saved."
+      # Auto-sync to cloud
+      cmd_playwright_auth sync
       ;;
 
     sync)
