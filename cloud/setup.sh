@@ -35,7 +35,6 @@ log "Connecting to Tailscale..."
 tailscale up \
   --authkey="${tailscale_auth_key}" \
   --hostname=amux-cloud \
-  --ssh \
   --accept-routes \
   || true
 

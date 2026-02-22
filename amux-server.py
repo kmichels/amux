@@ -254,6 +254,57 @@ def load_session_log(session: str) -> str:
     return ""
 
 
+# ── Yolo auto-responder ──────────────────────────────────────────────────────
+# When a session runs with --dangerously-skip-permissions, some Claude Code
+# internal safety prompts still require a keypress. We detect and answer them.
+_YOLO_PROMPTS = [
+    # Shell command substitution: "Command contains $() command substitution\nDo you want to proceed?"
+    (re.compile(r'command contains.*command substitution', re.IGNORECASE), '1'),
+    # Generic tool proceed prompt: "Do you want to proceed? ❯ 1. Yes  2. No"
+    (re.compile(r'do you want to proceed', re.IGNORECASE), '1'),
+    # Leaked permission prompt: "Yes, and don't ask again for <cmd>"
+    (re.compile(r'yes.*and don.t ask again', re.IGNORECASE), '1'),
+]
+_YOLO_COOLDOWN = 6  # seconds between auto-responses per session
+_yolo_last_responded: dict = {}
+
+
+def _yolo_auto_respond():
+    """Check yolo sessions for known blocking prompts and auto-answer them."""
+    now = time.time()
+    for f in CC_SESSIONS.glob("*.env"):
+        name = f.stem
+        try:
+            if not is_running(name):
+                continue
+            if now - _yolo_last_responded.get(name, 0) < _YOLO_COOLDOWN:
+                continue
+            cfg = parse_env_file(f)
+            if '--dangerously-skip-permissions' not in cfg.get('CC_FLAGS', ''):
+                continue
+            raw = tmux_capture(name, 20)
+            if not raw:
+                continue
+            clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
+            for pattern, response in _YOLO_PROMPTS:
+                if pattern.search(clean):
+                    send_text(name, response)
+                    _yolo_last_responded[name] = now
+                    break
+        except Exception:
+            pass
+
+
+def _yolo_loop():
+    """Background thread: auto-respond to yolo-blocking prompts every 3s."""
+    while True:
+        time.sleep(3)
+        try:
+            _yolo_auto_respond()
+        except Exception:
+            pass
+
+
 def _snapshot_all_sessions():
     """Capture scrollback for all running sessions and save to disk."""
     for f in CC_SESSIONS.glob("*.env"):
@@ -9809,6 +9860,9 @@ def main():
     # Start session log snapshot thread
     snapshotter = threading.Thread(target=_snapshot_loop, daemon=True)
     snapshotter.start()
+
+    # Start yolo auto-responder thread
+    threading.Thread(target=_yolo_loop, daemon=True).start()
     # Initial snapshot immediately
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
 
