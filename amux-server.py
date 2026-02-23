@@ -2643,6 +2643,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .settings-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   .settings-row input::placeholder { color: var(--dim); }
   .settings-sep { height: 1px; background: var(--border); margin: 6px 0; }
+  /* Theme toggle switch */
+  .theme-toggle { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+  .theme-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .theme-track {
+    width: 36px; height: 20px; background: var(--border); border-radius: 10px;
+    transition: background 0.2s; display: flex; align-items: center; padding: 2px;
+  }
+  .theme-toggle input:checked + .theme-track { background: var(--accent); }
+  .theme-thumb {
+    width: 16px; height: 16px; background: #fff; border-radius: 50%;
+    transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .theme-toggle input:checked + .theme-track .theme-thumb { transform: translateX(16px); }
   .settings-server-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 8px; border-radius: 6px; cursor: pointer; margin-bottom: 2px;
@@ -3366,7 +3379,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </button>
       <div class="active-dropdown" id="active-dropdown"></div>
     </div>
-    <button class="tile-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode" style="font-size:1rem;width:32px;height:32px;">🌙</button>
     <div class="header-add-wrap">
       <button class="header-add-btn" id="add-btn" onclick="event.stopPropagation();toggleAddMenu()">+</button>
       <div class="header-add-menu" id="add-menu">
@@ -3400,6 +3412,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             </div>
           </div>
           <div id="settings-server-list" style="margin-top:6px;"></div>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section">
+          <div class="settings-section-label">Appearance</div>
+          <div class="settings-row" style="justify-content:space-between;align-items:center;">
+            <span style="font-size:0.85rem;" id="theme-label">Dark mode</span>
+            <label class="theme-toggle">
+              <input type="checkbox" id="theme-checkbox" onchange="toggleTheme(this.checked)">
+              <span class="theme-track"><span class="theme-thumb"></span></span>
+            </label>
+          </div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" style="text-align:center;display:flex;flex-direction:column;gap:8px;">
@@ -3929,15 +3952,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 // ── Theme ──
 function _applyTheme(light) {
   document.body.classList.toggle('light', light);
-  const btn = document.getElementById('theme-btn');
-  if (btn) btn.textContent = light ? '☀️' : '🌙';
+  const cb = document.getElementById('theme-checkbox');
+  if (cb) cb.checked = light;
+  const lbl = document.getElementById('theme-label');
+  if (lbl) lbl.textContent = light ? 'Light mode' : 'Dark mode';
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = light ? '#ffffff' : '#0d1117';
 }
-function toggleTheme() {
-  const isLight = document.body.classList.contains('light');
-  localStorage.setItem('amux_theme', isLight ? 'dark' : 'light');
-  _applyTheme(!isLight);
+function toggleTheme(checked) {
+  const isLight = checked !== undefined ? checked : !document.body.classList.contains('light');
+  localStorage.setItem('amux_theme', isLight ? 'light' : 'dark');
+  _applyTheme(isLight);
 }
 (function initTheme() {
   const saved = localStorage.getItem('amux_theme');
