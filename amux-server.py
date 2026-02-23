@@ -209,17 +209,21 @@ def _write_env(path: Path, cfg: dict):
 # TMUX HELPERS
 # ═══════════════════════════════════════════
 
+_tmux_name_migrated = set()  # Sessions already checked for legacy name migration
+
 def tmux_name(session: str) -> str:
-    # Migrate cmux-* or cc-* → amux-* if old name exists
     new = f"amux-{session}"
-    for old in [f"cmux-{session}", f"cc-{session}"]:
-        try:
-            r = subprocess.run(["tmux", "has-session", "-t", old], capture_output=True)
-            if r.returncode == 0:
-                subprocess.run(["tmux", "rename-session", "-t", old, new], capture_output=True, timeout=5)
-                break
-        except Exception:
-            pass
+    # Only check for legacy cmux-*/cc-* names once per session per process lifetime
+    if session not in _tmux_name_migrated:
+        _tmux_name_migrated.add(session)
+        for old in [f"cmux-{session}", f"cc-{session}"]:
+            try:
+                r = subprocess.run(["tmux", "has-session", "-t", old], capture_output=True, timeout=3)
+                if r.returncode == 0:
+                    subprocess.run(["tmux", "rename-session", "-t", old, new], capture_output=True, timeout=5)
+                    break
+            except Exception:
+                pass
     return new
 
 
@@ -244,6 +248,18 @@ def tmux_capture(session: str, lines: int = 500) -> str:
         return r.stdout.strip()
     except Exception:
         return ""
+
+
+def _tmux_capture_batch(sessions: list, lines: int = 30) -> dict:
+    """Capture pane output for multiple sessions in parallel using threads.
+    Returns {session_name: output_str}."""
+    if not sessions:
+        return {}
+    from concurrent.futures import ThreadPoolExecutor
+    def _cap(name):
+        return name, tmux_capture(name, lines)
+    with ThreadPoolExecutor(max_workers=min(len(sessions), 16)) as pool:
+        return dict(pool.map(_cap, sessions))
 
 
 def _log_path(session: str) -> Path:
@@ -392,6 +408,9 @@ def get_claude_stats(work_dir: str) -> dict:
     return {"tokens": total_in + total_out, "last_active": last_ts}
 
 
+_model_cache = {}  # {work_dir: (model, mtime, timestamp)}
+_MODEL_CACHE_TTL = 15  # seconds
+
 def detect_active_model(work_dir: str) -> str:
     """Detect the model in use from the most recent Claude JSONL entries."""
     if not work_dir:
@@ -404,9 +423,19 @@ def detect_active_model(work_dir: str) -> str:
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
     if not jsonl_files:
         return ""
+    f = jsonl_files[0]
+    try:
+        mtime = f.stat().st_mtime
+    except OSError:
+        return ""
+    # Cache hit: same file mtime and within TTL
+    cached = _model_cache.get(work_dir)
+    if cached:
+        c_model, c_mtime, c_ts = cached
+        if c_mtime == mtime or (time.time() - c_ts < _MODEL_CACHE_TTL):
+            return c_model
     try:
         # Search from end in increasing chunks until we find a model
-        f = jsonl_files[0]
         size = f.stat().st_size
         for chunk_size in [200_000, 1_000_000, size]:
             with f.open("rb") as fh:
@@ -420,6 +449,7 @@ def detect_active_model(work_dir: str) -> str:
                     entry = json.loads(line)
                     model = entry.get("message", {}).get("model", "")
                     if model:
+                        _model_cache[work_dir] = (model, mtime, time.time())
                         return model
                 except (json.JSONDecodeError, AttributeError):
                     continue
@@ -427,6 +457,7 @@ def detect_active_model(work_dir: str) -> str:
                 break
     except Exception:
         pass
+    _model_cache[work_dir] = ("", mtime, time.time())
     return ""
 
 
@@ -1221,10 +1252,16 @@ def list_sessions() -> list:
     if not CC_SESSIONS.is_dir():
         return sessions
     tmux_info = _tmux_info_map()
-    for f in sorted(CC_SESSIONS.glob("*.env")):
+    # Pre-compute which sessions are running and batch-capture their panes
+    env_files = sorted(CC_SESSIONS.glob("*.env"))
+    running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
+    captures = _tmux_capture_batch(running_names, 30) if running_names else {}
+    # Refresh token cache once (not per session)
+    _refresh_token_cache()
+    for f in env_files:
         name = f.stem
         cfg = parse_env_file(f)
-        running = is_running(name)
+        running = tmux_name(name) in tmux_info
         preview = ""
         preview_lines = []
         status = ""
@@ -1238,7 +1275,7 @@ def list_sessions() -> list:
         pane_title = tinfo.get("pane_title", "")
         raw = ""
         if running:
-            raw = tmux_capture(name, 30)
+            raw = captures.get(name, "")
         elif _log_path(name).exists():
             # Load saved log for stopped sessions (last 30 lines worth)
             saved = load_session_log(name)
@@ -1267,14 +1304,13 @@ def list_sessions() -> list:
                     continue
                 intelligible.append(cl[:200])
             preview_lines = intelligible[-5:] if intelligible else []
-        # Detect active model from JSONL (fast — reads last 50KB)
+        # Detect active model from JSONL
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
         active_model = detect_active_model(raw_dir)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
-        # Token count from JSONL cache
-        _refresh_token_cache()
+        # Token count from JSONL cache (refreshed once above the loop)
         proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
         tokens = _token_cache["data"].get(proj_key, 0)
         sessions.append({
@@ -1296,7 +1332,6 @@ def list_sessions() -> list:
             "task_name": pane_title,
             "tokens": tokens,
         })
-    # Pinned first, then working/waiting, then by last activity (most recent first)
     status_order = {"active": 0, "waiting": 0, "idle": 1, "": 1}
     sessions.sort(key=lambda s: (not s["pinned"], not s["running"], status_order.get(s["status"], 1), -s["last_activity"]))
     return sessions
@@ -9300,8 +9335,11 @@ class ResilientHTTPSServer(ThreadingHTTPServer):
 
 class CCHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        ip = self.client_address[0]
-        slog(f"[{ip}] {args[0]}")
+        pass  # Suppressed — we do our own timing-aware logging in _route()
+
+    def send_response(self, code, message=None):
+        self._resp_status = code
+        super().send_response(code, message)
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -9401,12 +9439,20 @@ class CCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
+        self._resp_status = 200
+        t0 = time.monotonic()
         try:
             return self._route_inner(method, path, qs)
         except Exception as e:
             import traceback
             slog(f"ERROR {method} {path} — {e}\n{traceback.format_exc()}")
             return self._json({"error": str(e)}, 500)
+        finally:
+            # Skip logging SSE (long-lived) connections
+            if path != "/api/events":
+                dt_ms = (time.monotonic() - t0) * 1000
+                ip = self.client_address[0]
+                slog(f"[{ip}] {method} {path} {self._resp_status} {dt_ms:.0f}ms")
 
     def _route_inner(self, method: str, path: str, qs: dict):
 
