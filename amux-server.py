@@ -73,11 +73,14 @@ SERVER_LOG = CC_LOGS / "server.log"
 _server_log_lock = threading.Lock()
 
 def slog(*args):
-    """Append a timestamped line to ~/.amux/logs/server.log and stderr."""
+    """Append a timestamped line to ~/.amux/logs/server.log (and stderr if TTY)."""
     import datetime
     msg = " ".join(str(a) for a in args)
     line = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n"
-    sys.stderr.write(line)
+    # Only write to stderr if it's a real terminal — launchd redirects stderr
+    # to server.log, so writing to both would double every line.
+    if sys.stderr.isatty():
+        sys.stderr.write(line)
     try:
         with _server_log_lock:
             with open(SERVER_LOG, "a") as f:
@@ -4897,7 +4900,7 @@ async function sendFromInput(name) {
   cmdHistoryAdd(text);
   inp.value = '';
   inp.style.height = 'auto';
-  await doSend(name, text);
+  await doSend(name, _expandAtMentions(text));
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
@@ -5487,6 +5490,7 @@ async function sendPeekCmd() {
     const refs = files.map(f => '@' + f.path).join(' ');
     message = text ? `${text} ${refs}` : refs;
   }
+  message = _expandAtMentions(message);
 
   inp.value = '';
   inp.style.height = 'auto';
@@ -5507,6 +5511,27 @@ async function peekQuickKeys(keys) {
   if (!peekSession) return;
   await doKeys(peekSession, keys);
   setTimeout(refreshPeek, 500);
+}
+
+// ── @mention → HTTP API hint ──
+// When a message contains @session-name mentions, append a compact API hint
+// so Claude knows to use the HTTP API for delegation (not tmux directly).
+function _expandAtMentions(text) {
+  const known = (window._sessions || []).map(s => s.name);
+  // find all @word tokens that match a known session name
+  const mentioned = [];
+  const re = /@([\w][\w.-]*)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const n = m[1];
+    if (known.includes(n) && !mentioned.includes(n)) mentioned.push(n);
+  }
+  if (mentioned.length === 0) return text;
+  const base = '$AMUX_URL';
+  const hints = mentioned.map(n =>
+    `  @${n} → POST ${base}/api/sessions/${n}/send  {"text":"<msg>"}`
+  ).join('\n');
+  return text + '\n\n[amux: use HTTP API to reach @-mentioned sessions — never tmux directly]\n' + hints;
 }
 
 // ── @mention helpers ──
