@@ -1473,6 +1473,28 @@ def _session_work_dir(name: str) -> str:
     return ""
 
 
+def _git_info(work_dir: str) -> dict:
+    """Return {branch, repo} for a directory. Returns empty strings if not a git repo."""
+    if not work_dir:
+        return {"branch": "", "repo": ""}
+    try:
+        rb = subprocess.run(
+            ["git", "-C", work_dir, "branch", "--show-current"],
+            capture_output=True, text=True, timeout=1,
+        )
+        branch = rb.stdout.strip() if rb.returncode == 0 else ""
+        repo = ""
+        if branch:
+            rr = subprocess.run(
+                ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=1,
+            )
+            repo = rr.stdout.strip() if rr.returncode == 0 else ""
+        return {"branch": branch, "repo": repo}
+    except Exception:
+        return {"branch": "", "repo": ""}
+
+
 def _migrate_memory_files():
     """Startup migration: copy project-dir-keyed memory files to session-name-keyed.
 
@@ -1921,6 +1943,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .card-dir-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-dir-edit { flex-shrink: 0; opacity: 0.3; transition: opacity 0.15s; cursor: pointer; font-size: 0.85rem; padding: 0 2px; border-radius: 3px; }
   .card-dir-edit:hover { color: var(--accent); opacity: 1 !important; }
+  .branch-badge {
+    display: inline-flex; align-items: center; gap: 3px; font-size: 0.75rem;
+    color: var(--dim); cursor: pointer; padding: 1px 6px; border-radius: 3px;
+    border: 1px solid transparent; transition: border-color 0.15s, color 0.15s;
+    flex-shrink: 0; white-space: nowrap; user-select: none;
+  }
+  .branch-badge:hover { border-color: var(--border); color: var(--fg); }
+  .branch-badge.on-main { color: var(--yellow); }
+  .branch-badge.on-branch { color: var(--green); }
+  .branch-badge.conflict { color: var(--red) !important; }
+  .branch-popover {
+    position: absolute; z-index: 200; left: 12px; right: 12px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); margin-top: 4px;
+  }
+  .branch-popover input { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+  .branch-popover-actions { display: flex; gap: 6px; }
   .card-preview { color: var(--dim); font-size: 0.78rem; margin-top: 4px; margin-left: 20px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-preview-lines {
     color: var(--dim); font-size: 0.75rem; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
@@ -3716,6 +3755,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 // ═══════ STATE & GLOBALS ═══════
 const API = '';
 let sessions = [];
+let gitInfo = {};  // {sessionName: {branch, repo, _conflict}}
 let _initialLoad = true;   // true until first data arrives from server
 let _lastDataTime = null;  // timestamp of last successful data
 let _debugLog = [];        // recent connection events (capped at 12)
@@ -4190,6 +4230,7 @@ async function fetchSessions() {
       sessions = data;
       localStorage.setItem('amux_sessions_cache', j);
       render();
+      _fetchGitBranches(sessions);
     }
   } catch(e) {
     console.error('fetch sessions:', e);
@@ -4327,6 +4368,7 @@ function render() {
       </div>
       ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span></div>` : ''}
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
+      ${s.dir ? _renderBranchBadge(s.name) : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
@@ -4491,6 +4533,103 @@ function fmtDuration(sec) {
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm';
   return sec + 's';
+}
+
+// ═══════ GIT BRANCH AWARENESS ═══════
+function _isBranchMain(b) { return !b || b === 'main' || b === 'master' || b === 'dev' || b === 'develop'; }
+
+function _renderBranchBadge(name) {
+  const gi = gitInfo[name];
+  if (!gi || !gi.branch) return '';
+  const isMain = _isBranchMain(gi.branch);
+  const cls = gi._conflict ? 'conflict' : isMain ? 'on-main' : 'on-branch';
+  const tip = gi._conflict ? 'Another session shares this branch — risk of conflicts' : isMain ? 'On main — click to create a session branch' : 'On feature branch';
+  const conflictWarn = gi._conflict ? ' ⚠' : '';
+  return `<div class="card-dir"><span class="branch-badge ${cls}" onclick="event.stopPropagation();showBranchPopover('${name}',event)" title="${tip}">⎇ ${esc(gi.branch)}${conflictWarn}</span></div>`;
+}
+
+async function _fetchGitBranches(sess) {
+  const withDir = (sess || []).filter(s => s.dir);
+  if (!withDir.length) return;
+  const results = await Promise.allSettled(
+    withDir.map(s =>
+      fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/git')
+        .then(r => r.json()).then(d => ({name: s.name, ...d}))
+    )
+  );
+  const newInfo = {};
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value.name) newInfo[r.value.name] = r.value;
+  }
+  // Detect conflicts: two sessions on same branch in same repo
+  const byKey = {};
+  for (const [n, gi] of Object.entries(newInfo)) {
+    if (!gi.branch || !gi.repo) continue;
+    const key = gi.repo + '::' + gi.branch;
+    (byKey[key] = byKey[key] || []).push(n);
+  }
+  for (const names of Object.values(byKey)) {
+    if (names.length > 1) names.forEach(n => { if (newInfo[n]) newInfo[n]._conflict = true; });
+  }
+  if (JSON.stringify(newInfo) !== JSON.stringify(gitInfo)) {
+    gitInfo = newInfo;
+    render();
+  }
+}
+
+function showBranchPopover(name, e) {
+  e.stopPropagation();
+  document.querySelectorAll('.branch-popover').forEach(p => p.remove());
+  const gi = gitInfo[name] || {};
+  const isMain = _isBranchMain(gi.branch);
+  const suggested = 'session/' + name;
+  const card = e.target.closest('.card');
+  if (!card) return;
+  card.style.position = 'relative';
+  const pop = document.createElement('div');
+  pop.className = 'branch-popover';
+  pop.onclick = ev => ev.stopPropagation();
+  if (isMain) {
+    pop.innerHTML = `
+      <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;font-weight:600;">⎇ Create session branch</div>
+      <div style="font-size:0.78rem;color:var(--dim);margin-bottom:8px;">Isolate this session's changes from other sessions on <strong>${esc(gi.branch || 'main')}</strong></div>
+      <input class="search-input" id="bp-input-${name}" value="${esc(suggested)}" style="font-size:0.82rem;margin-bottom:8px;">
+      <div class="branch-popover-actions">
+        <button class="btn primary" style="flex:1;" onclick="doCreateBranch('${name}')">Create &amp; checkout</button>
+        <button class="btn" onclick="document.querySelectorAll('.branch-popover').forEach(p=>p.remove())">✕</button>
+      </div>`;
+  } else {
+    pop.innerHTML = `
+      <div style="font-size:0.75rem;color:var(--dim);margin-bottom:6px;font-weight:600;">⎇ ${esc(gi.branch)}</div>
+      ${gi._conflict ? '<div style="font-size:0.78rem;color:var(--red);margin-bottom:6px;">⚠ Another session shares this branch — conflicts possible</div>' : '<div style="font-size:0.78rem;color:var(--green);margin-bottom:6px;">✓ Isolated on feature branch</div>'}
+      <button class="btn" style="width:100%;" onclick="document.querySelectorAll('.branch-popover').forEach(p=>p.remove())">Close</button>`;
+  }
+  card.appendChild(pop);
+  setTimeout(() => {
+    document.addEventListener('click', function closer() {
+      document.querySelectorAll('.branch-popover').forEach(p => p.remove());
+      document.removeEventListener('click', closer);
+    }, {once: true});
+  }, 10);
+}
+
+async function doCreateBranch(name) {
+  const input = document.getElementById('bp-input-' + name);
+  const branch = (input ? input.value : '').trim() || ('session/' + name);
+  document.querySelectorAll('.branch-popover').forEach(p => p.remove());
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/git', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({branch, create: true}),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      gitInfo[name] = {...(gitInfo[name] || {}), branch, _conflict: false};
+      render();
+    } else {
+      alert('Branch creation failed: ' + (d.error || 'unknown error'));
+    }
+  } catch(ex) { alert('Error: ' + ex.message); }
 }
 
 function toggle(name) {
@@ -10311,6 +10450,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg = parse_env_file(env_file)
                 stats = get_claude_stats(cfg.get("CC_DIR", ""))
                 return self._json(stats)
+            if action == "git":
+                wd = _session_work_dir(name)
+                return self._json(_git_info(wd))
             if action == "memory":
                 mem_file = _session_mem_file(name)
                 wd = _session_work_dir(name)
@@ -10351,6 +10493,28 @@ class CCHandler(BaseHTTPRequestHandler):
                 if wd:
                     _write_claude_memory(name, wd)
                 return self._json({"ok": True})
+            if action == "git":
+                body = self._read_body()
+                branch = body.get("branch", "").strip()
+                create = bool(body.get("create", False))
+                wd = _session_work_dir(name)
+                if not wd:
+                    return self._json({"error": "session has no directory"}, 400)
+                if not branch:
+                    return self._json({"error": "branch name required"}, 400)
+                if not re.match(r'^[a-zA-Z0-9_./@\-]+$', branch):
+                    return self._json({"error": "invalid branch name"}, 400)
+                cmd = ["git", "-C", wd, "checkout"]
+                if create:
+                    cmd.append("-b")
+                cmd.append(branch)
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0:
+                        return self._json({"ok": True, "branch": branch})
+                    return self._json({"ok": False, "error": (r.stderr or r.stdout).strip()}, 400)
+                except Exception as ex:
+                    return self._json({"ok": False, "error": str(ex)}, 500)
             if action == "start":
                 ok, msg = start_session(name)
                 meta = _load_meta(name)
