@@ -714,6 +714,16 @@ CREATE TABLE IF NOT EXISTS schedules (
     deleted     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_next ON schedules(next_run) WHERE deleted IS NULL AND enabled=1;
+CREATE TABLE IF NOT EXISTS reports (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    type         TEXT NOT NULL DEFAULT 'infra-spend',
+    config       TEXT NOT NULL DEFAULT '{}',
+    position     INTEGER NOT NULL DEFAULT 0,
+    created      INTEGER NOT NULL,
+    last_refresh INTEGER,
+    cached_data  TEXT
+);
 """
 
 
@@ -768,6 +778,185 @@ def _load_board_raw() -> dict:
         except Exception:
             pass
     return {}
+
+
+# ── Report type registry ─────────────────────────────────────────────────────
+# Each entry: { label, description, vendors: { id: { label, color, env_vars, fetch } } }
+# To add a new report type, append an entry here — no other code changes needed.
+
+def _report_fetch_anyscale(cfg):
+    import json as _j, urllib.request as _ur
+    key = os.environ.get("AMUX_ANYSCALE_API_KEY", "")
+    if not key:
+        return {"name": "Anyscale", "error": "AMUX_ANYSCALE_API_KEY not set", "daily": [], "monthly": []}
+    try:
+        req = _ur.Request("https://console.anyscale.com/api/v2/billing_invoices?limit=12",
+                          headers={"Authorization": f"Bearer {key}"})
+        with _ur.urlopen(req, timeout=10) as r:
+            inv = _j.loads(r.read())
+        monthly = [{"month": i.get("period_start", "")[:7],
+                    "amount": float(i.get("amount_due", 0)) / 100}
+                   for i in inv.get("results", [])]
+        return {"name": "Anyscale", "daily": [], "monthly": monthly, "currency": "USD", "error": None}
+    except Exception as e:
+        return {"name": "Anyscale", "error": str(e), "daily": [], "monthly": []}
+
+
+def _report_fetch_render(cfg):
+    import json as _j, urllib.request as _ur
+    key = os.environ.get("AMUX_RENDER_API_KEY", "")
+    if not key:
+        return {"name": "Render", "error": "AMUX_RENDER_API_KEY not set", "daily": [], "monthly": []}
+    try:
+        req = _ur.Request("https://api.render.com/v1/billing/summary",
+                          headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
+        with _ur.urlopen(req, timeout=10) as r:
+            data = _j.loads(r.read())
+        monthly = [{"month": m.get("month", ""), "amount": float(m.get("total", 0))}
+                   for m in data.get("monthlyCharges", [])]
+        return {"name": "Render", "daily": [], "monthly": monthly, "currency": "USD", "error": None}
+    except Exception as e:
+        return {"name": "Render", "error": str(e), "daily": [], "monthly": []}
+
+
+def _report_fetch_mongo(cfg):
+    import json as _j, urllib.request as _ur, urllib.parse as _up
+    import hashlib as _hl, http.client as _hc, ssl as _ssl, time as _t
+    pub  = os.environ.get("AMUX_MONGO_PUBLIC_KEY", "")
+    priv = os.environ.get("AMUX_MONGO_PRIVATE_KEY", "")
+    org  = os.environ.get("AMUX_MONGO_ORG_ID", "")
+    if not (pub and priv and org):
+        return {"name": "MongoDB", "error": "AMUX_MONGO_PUBLIC_KEY / PRIVATE_KEY / ORG_ID not set",
+                "daily": [], "monthly": []}
+    try:
+        url = f"https://cloud.mongodb.com/api/atlas/v2/orgs/{org}/invoices?includePartialInvoices=true"
+        parsed = _up.urlparse(url)
+        # First pass to get Digest challenge
+        conn = _hc.HTTPSConnection(parsed.netloc, context=_ssl.create_default_context())
+        conn.request("GET", parsed.path + "?" + parsed.query,
+                     headers={"Accept": "application/vnd.atlas.2023-01-01+json"})
+        resp = conn.getresponse(); resp.read()
+        if resp.status == 401:
+            www = resp.getheader("WWW-Authenticate", "")
+            realm_m = re.search(r'realm="([^"]+)"', www)
+            nonce_m = re.search(r'nonce="([^"]+)"', www)
+            if realm_m and nonce_m:
+                realm, nonce = realm_m.group(1), nonce_m.group(1)
+                ha1  = _hl.md5(f"{pub}:{realm}:{priv}".encode()).hexdigest()
+                ha2  = _hl.md5(f"GET:{parsed.path}".encode()).hexdigest()
+                nc = "00000001"; cnonce = _hl.md5(str(_t.time()).encode()).hexdigest()[:8]
+                rh   = _hl.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
+                auth = (f'Digest username="{pub}",realm="{realm}",nonce="{nonce}"'
+                        f',uri="{parsed.path}",qop=auth,nc={nc},cnonce="{cnonce}",response="{rh}"')
+                conn2 = _hc.HTTPSConnection(parsed.netloc, context=_ssl.create_default_context())
+                conn2.request("GET", parsed.path + "?" + parsed.query,
+                              headers={"Accept": "application/vnd.atlas.2023-01-01+json", "Authorization": auth})
+                resp = conn2.getresponse()
+        body_b = resp.read()
+        body_d = _j.loads(body_b)
+        monthly = [{"month": inv.get("startDate", "")[:7],
+                    "amount": float(inv.get("amountBilledCents", 0)) / 100}
+                   for inv in body_d.get("results", [])]
+        return {"name": "MongoDB", "daily": [], "monthly": monthly, "currency": "USD", "error": None}
+    except Exception as e:
+        return {"name": "MongoDB", "error": str(e), "daily": [], "monthly": []}
+
+
+def _report_fetch_gcp(cfg):
+    import json as _j, urllib.request as _ur, urllib.parse as _up
+    import base64 as _b64
+    from datetime import date, timedelta
+    sa_path = os.environ.get("AMUX_GCP_SA_KEY_PATH", "")
+    billing_acct = os.environ.get("AMUX_GCP_BILLING_ACCOUNT", "")
+    if not (sa_path and billing_acct):
+        return {"name": "GCP", "error": "AMUX_GCP_SA_KEY_PATH and AMUX_GCP_BILLING_ACCOUNT not set",
+                "daily": [], "monthly": []}
+    try:
+        import time as _t
+        with open(sa_path) as f:
+            sa = _j.load(f)
+        now = int(_t.time())
+        header  = _b64.urlsafe_b64encode(_j.dumps({"alg": "RS256", "typ": "JWT"}).encode()).rstrip(b"=")
+        payload = _b64.urlsafe_b64encode(_j.dumps({
+            "iss": sa["client_email"],
+            "scope": "https://www.googleapis.com/auth/cloud-billing.readonly",
+            "aud": "https://oauth2.googleapis.com/token", "iat": now, "exp": now + 3600
+        }).encode()).rstrip(b"=")
+        try:
+            from cryptography.hazmat.primitives import serialization, hashes
+            from cryptography.hazmat.primitives.asymmetric import padding as _pad
+            pk = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+            sig = _b64.urlsafe_b64encode(pk.sign(header + b"." + payload, _pad.PKCS1v15(), hashes.SHA256())).rstrip(b"=")
+        except ImportError:
+            return {"name": "GCP", "error": "cryptography package required: pip install cryptography",
+                    "daily": [], "monthly": []}
+        jwt = (header + b"." + payload + b"." + sig).decode()
+        tok_req = _ur.Request("https://oauth2.googleapis.com/token",
+            data=_up.urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": jwt}).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        with _ur.urlopen(tok_req, timeout=10) as r:
+            access_token = _j.loads(r.read())["access_token"]
+        start = (date.today().replace(day=1) - timedelta(days=365)).isoformat()
+        url = (f"https://cloudbilling.googleapis.com/v1/{billing_acct}/reports"
+               f"?interval.startDate={start}")
+        req = _ur.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+        with _ur.urlopen(req, timeout=15) as r:
+            data = _j.loads(r.read())
+        monthly = [{"month": row.get("month", ""), "amount": float(row.get("costAmount", 0))}
+                   for row in data.get("reports", [])]
+        return {"name": "GCP", "daily": [], "monthly": monthly, "currency": "USD", "error": None}
+    except Exception as e:
+        return {"name": "GCP", "error": str(e), "daily": [], "monthly": []}
+
+
+def _report_fetch_qdrant(cfg):
+    import json as _j, urllib.request as _ur
+    key = os.environ.get("AMUX_QDRANT_CLOUD_API_KEY", "")
+    if not key:
+        return {"name": "Qdrant", "error": "AMUX_QDRANT_CLOUD_API_KEY not set", "daily": [], "monthly": []}
+    try:
+        req = _ur.Request("https://cloud.qdrant.io/public/v1/billing/invoices",
+                          headers={"api-key": key, "Accept": "application/json"})
+        with _ur.urlopen(req, timeout=10) as r:
+            data = _j.loads(r.read())
+        monthly = [{"month": inv.get("period", "")[:7], "amount": float(inv.get("total", 0))}
+                   for inv in data.get("invoices", [])]
+        return {"name": "Qdrant", "daily": [], "monthly": monthly, "currency": "USD", "error": None}
+    except Exception as e:
+        return {"name": "Qdrant", "error": str(e), "daily": [], "monthly": []}
+
+
+# Registry maps type_id → metadata + vendor fetchers.
+# To add a new report type: add an entry here. The UI reads /api/reports/types dynamically.
+_REPORT_TYPE_REGISTRY = {
+    "infra-spend": {
+        "label": "Infrastructure Spend",
+        "description": "Aggregate cloud & infrastructure spend across vendors (daily/weekly/monthly)",
+        "vendors": {
+            "gcp":      {"label": "GCP",       "color": "#4285F4",
+                         "env_vars": ["AMUX_GCP_SA_KEY_PATH", "AMUX_GCP_BILLING_ACCOUNT"],
+                         "fetch": _report_fetch_gcp},
+            "anyscale": {"label": "Anyscale",  "color": "#FF6B35",
+                         "env_vars": ["AMUX_ANYSCALE_API_KEY"],
+                         "fetch": _report_fetch_anyscale},
+            "render":   {"label": "Render",    "color": "#46E3B7",
+                         "env_vars": ["AMUX_RENDER_API_KEY"],
+                         "fetch": _report_fetch_render},
+            "mongo":    {"label": "MongoDB",   "color": "#47A248",
+                         "env_vars": ["AMUX_MONGO_PUBLIC_KEY", "AMUX_MONGO_PRIVATE_KEY", "AMUX_MONGO_ORG_ID"],
+                         "fetch": _report_fetch_mongo},
+            "qdrant":   {"label": "Qdrant",    "color": "#DC244C",
+                         "env_vars": ["AMUX_QDRANT_CLOUD_API_KEY"],
+                         "fetch": _report_fetch_qdrant},
+        },
+    },
+    # Add more report types here, e.g.:
+    # "custom-http": {
+    #     "label": "Custom HTTP",
+    #     "description": "Fetch JSON from any URL and display as a chart",
+    #     "vendors": { ... },
+    # },
+}
 
 
 def _migrate_flat_to_sqlite():
@@ -2032,6 +2221,29 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   body.light #file-overlay .file-overlay-body.file-image,
   body.light #file-overlay .file-overlay-body.file-pdf,
   body.light #file-overlay .file-overlay-body.markdown { background: var(--bg); color: var(--text); }
+  /* ── Reports ── */
+  .report-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .report-card-header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg); }
+  .report-card-title { font-weight:600; font-size:0.85rem; flex:1; }
+  .report-refresh-btn { background:none; border:none; cursor:pointer; color:var(--dim); font-size:0.85rem; padding:3px 7px; border-radius:4px; }
+  .report-refresh-btn:hover { background:var(--card); color:var(--text); }
+  .report-refresh-btn.spinning { animation: spin 1s linear infinite; }
+  .report-del-btn { background:none; border:none; cursor:pointer; color:var(--dim); font-size:0.8rem; padding:3px 7px; border-radius:4px; }
+  .report-del-btn:hover { background:rgba(248,81,73,0.1); color:#f85149; }
+  .report-period-tabs { display:flex; gap:4px; }
+  .report-period-tab { padding:3px 9px; border-radius:5px; border:1px solid var(--border); background:none; color:var(--dim); font-size:0.75rem; cursor:pointer; }
+  .report-period-tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .report-body { padding:14px; }
+  .report-chart-wrap { position:relative; height:200px; margin-bottom:12px; }
+  .report-table { width:100%; border-collapse:collapse; font-size:0.78rem; }
+  .report-table th { text-align:left; color:var(--dim); font-weight:500; padding:4px 8px; border-bottom:1px solid var(--border); }
+  .report-table td { padding:5px 8px; border-bottom:1px solid var(--border); }
+  .report-table tr:last-child td { border-bottom:none; }
+  .report-vendor-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
+  .report-error { color:var(--dim); font-size:0.78rem; padding:4px 0; }
+  .report-last-refresh { font-size:0.72rem; color:var(--dim); }
+  .report-total { font-weight:600; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   html { font-size: 16px; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -3565,10 +3777,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <!-- Reports view -->
 <div id="reports-view" style="display:none;">
-  <div class="empty-state" style="padding:48px 16px;text-align:center;">
-    <div style="font-size:2rem;margin-bottom:12px;">📊</div>
-    <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Reports</div>
-    <div style="color:var(--dim);font-size:0.85rem;">Spend, usage, and metrics from external sources will appear here.</div>
+  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;">
+    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Reports</span>
+    <div style="flex:1;"></div>
+    <button class="btn" onclick="openAddReport()" style="font-size:0.78rem;padding:4px 10px;">+ Add Report</button>
+  </div>
+  <div id="reports-list" style="padding:0 12px 12px;display:flex;flex-direction:column;gap:12px;"></div>
+  <!-- Add report modal -->
+  <div id="add-report-overlay" class="board-edit-overlay" onclick="if(event.target===this)closeAddReport()" style="display:none;">
+    <div class="board-edit-box" style="max-width:400px;">
+      <div style="font-weight:600;font-size:0.9rem;margin-bottom:12px;">Add Report</div>
+      <div class="field-group">
+        <label class="field-label">Report Name</label>
+        <input id="add-report-name" type="text" placeholder="Ops Spend" autocomplete="off" style="width:100%;box-sizing:border-box;">
+      </div>
+      <div class="field-group">
+        <label class="field-label">Type</label>
+        <select id="add-report-type" onchange="_updateAddReportVendors()" style="width:100%;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;">
+          <option value="infra-spend">Infrastructure Spend</option>
+        </select>
+      </div>
+      <div class="field-group" id="add-report-vendors-group">
+        <label class="field-label">Vendors</label>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button class="btn" onclick="closeAddReport()" style="flex:1;">Cancel</button>
+        <button class="btn primary" onclick="submitAddReport()" style="flex:1;">Add</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -7268,6 +7505,252 @@ document.addEventListener('DOMContentLoaded', function() {
   }
 });
 
+// ═══════ REPORTS ═══════
+let _reportTypes = {};  // loaded from /api/reports/types
+let _reportCharts = {};  // chartId → Chart instance
+
+function _vendorColor(typeId, vid) {
+  return (_reportTypes[typeId]?.vendors?.[vid]?.color) || '#888';
+}
+function _vendorLabel(typeId, vid) {
+  return (_reportTypes[typeId]?.vendors?.[vid]?.label) || vid;
+}
+
+async function fetchReports() {
+  const [rTypes, rReports] = await Promise.all([
+    fetch(API + '/api/reports/types').then(r=>r.json()).catch(()=>({})),
+    fetch(API + '/api/reports').then(r=>r.json()).catch(()=>[]),
+  ]);
+  _reportTypes = rTypes;
+  renderReports(rReports);
+}
+
+function renderReports(reports) {
+  const list = document.getElementById('reports-list');
+  if (!reports.length) {
+    list.innerHTML = '<div style="text-align:center;padding:40px 0;color:var(--dim);font-size:0.85rem;">No reports yet. Click <b>+ Add Report</b> to get started.</div>';
+    return;
+  }
+  // Destroy old chart instances
+  Object.values(_reportCharts).forEach(c => { try { c.destroy(); } catch(e){} });
+  _reportCharts = {};
+  list.innerHTML = reports.map(r => `
+    <div class="report-card" data-report-id="${r.id}" data-report-type="${r.type||'infra-spend'}">
+      <div class="report-card-header">
+        <span class="report-card-title">${esc(r.name)}</span>
+        <span class="report-last-refresh" id="rpt-refresh-ts-${r.id}">${r.last_refresh ? 'Updated ' + _fmtRelTime(r.last_refresh) : 'Never refreshed'}</span>
+        <button class="report-refresh-btn" id="rpt-refresh-btn-${r.id}" onclick="refreshReport('${r.id}')" title="Refresh">&#x21BB;</button>
+        <button class="report-del-btn" onclick="deleteReport('${r.id}')" title="Delete report">&times;</button>
+      </div>
+      <div class="report-body" id="rpt-body-${r.id}">
+        <div style="color:var(--dim);font-size:0.82rem;padding:20px 0;text-align:center;">
+          Click \u21bb to load data
+        </div>
+      </div>
+    </div>
+  `).join('');
+  // Auto-load cached data for each report
+  reports.forEach(r => loadReportData(r.id, null));
+}
+
+async function loadReportData(id, data) {
+  if (!data) {
+    try {
+      const r = await fetch(API + '/api/reports/' + id + '/data');
+      const d = await r.json();
+      data = d.data;
+      if (d.refreshed_at) {
+        const el = document.getElementById('rpt-refresh-ts-' + id);
+        if (el) el.textContent = 'Updated ' + _fmtRelTime(d.refreshed_at);
+      }
+    } catch(e) { return; }
+  }
+  if (!data || !Object.keys(data).length) return;
+  const body = document.getElementById('rpt-body-' + id);
+  if (!body) return;
+  body.innerHTML = `
+    <div class="report-period-tabs" style="margin-bottom:10px;">
+      <button class="report-period-tab active" onclick="setReportPeriod('${id}','monthly',this)">Monthly</button>
+      <button class="report-period-tab" onclick="setReportPeriod('${id}','weekly',this)">Weekly</button>
+      <button class="report-period-tab" onclick="setReportPeriod('${id}','daily',this)">Daily</button>
+    </div>
+    <div class="report-chart-wrap"><canvas id="rpt-chart-${id}"></canvas></div>
+    <table class="report-table">
+      <thead><tr><th>Vendor</th><th style="text-align:right">This Month</th><th style="text-align:right">Last Month</th><th style="text-align:right">Total (12mo)</th></tr></thead>
+      <tbody id="rpt-table-${id}"></tbody>
+    </table>
+  `;
+  body._data = data;
+  body._period = 'monthly';
+  // store report type for vendor color/label lookups
+  const _rCard = body.closest('[data-report-id]');
+  body._rtype = _rCard ? (_rCard.dataset.reportType || 'infra-spend') : 'infra-spend';
+  _renderReportChart(id, data, 'monthly');
+}
+
+function setReportPeriod(id, period, btn) {
+  const body = document.getElementById('rpt-body-' + id);
+  if (!body || !body._data) return;
+  body._period = period;
+  body.querySelectorAll('.report-period-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  _renderReportChart(id, body._data, period);
+}
+
+function _renderReportChart(id, data, period) {
+  const canvas = document.getElementById('rpt-chart-' + id);
+  const tbody = document.getElementById('rpt-table-' + id);
+  if (!canvas) return;
+
+  const body = document.getElementById('rpt-body-' + id);
+  const rtype = body?._rtype || 'infra-spend';
+  const vendors = Object.keys(data);
+  // Collect all period labels
+  const labelSet = new Set();
+  vendors.forEach(v => {
+    (data[v][period] || []).forEach(p => labelSet.add(p.month || p.week || p.date || ''));
+  });
+  const labels = [...labelSet].sort().slice(-12);
+
+  // Build datasets
+  const datasets = vendors.map(v => {
+    const vdata = data[v];
+    const pts = {};
+    (vdata[period] || []).forEach(p => { pts[p.month || p.week || p.date || ''] = p.amount || 0; });
+    return {
+      label: _vendorLabel(rtype, v),
+      data: labels.map(l => pts[l] || 0),
+      backgroundColor: _vendorColor(rtype, v),
+      borderRadius: 3,
+    };
+  });
+
+  // Destroy old chart
+  if (_reportCharts[id]) { try { _reportCharts[id].destroy(); } catch(e){} }
+
+  if (typeof Chart !== 'undefined' && labels.length) {
+    _reportCharts[id] = new Chart(canvas, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, boxWidth: 12 } } },
+        scales: {
+          x: { stacked: true, ticks: { font: { size: 10 }, maxRotation: 45 } },
+          y: { stacked: true, ticks: { font: { size: 10 }, callback: v => '$' + v.toFixed(0) } }
+        }
+      }
+    });
+  } else if (!labels.length) {
+    canvas.parentElement.innerHTML = '<div style="text-align:center;padding:30px 0;color:var(--dim);font-size:0.82rem;">No data available \u2014 click \u21bb to fetch</div>';
+  }
+
+  // Table: show per-vendor current month, last month, 12mo total
+  if (tbody) {
+    const now = new Date();
+    const thisMo = now.toISOString().slice(0,7);
+    const lastMo = new Date(now.getFullYear(), now.getMonth()-1, 1).toISOString().slice(0,7);
+    let rows = '';
+    let totThis=0, totLast=0, tot12=0;
+    vendors.forEach(v => {
+      const vd = data[v];
+      const vcolor = _vendorColor(rtype, v);
+      const vlabel = _vendorLabel(rtype, v);
+      if (vd.error) {
+        rows += `<tr><td><span class="report-vendor-dot" style="background:${vcolor}"></span>${vlabel}</td><td colspan="3" class="report-error">${esc(vd.error)}</td></tr>`;
+        return;
+      }
+      const monthly = vd.monthly || [];
+      const thisAmt = monthly.find(m=>m.month===thisMo)?.amount||0;
+      const lastAmt = monthly.find(m=>m.month===lastMo)?.amount||0;
+      const total12 = monthly.slice(-12).reduce((a,m)=>a+m.amount,0);
+      totThis+=thisAmt; totLast+=lastAmt; tot12+=total12;
+      rows += `<tr>
+        <td><span class="report-vendor-dot" style="background:${vcolor}"></span>${vlabel}</td>
+        <td style="text-align:right">$${thisAmt.toFixed(2)}</td>
+        <td style="text-align:right">$${lastAmt.toFixed(2)}</td>
+        <td style="text-align:right">$${total12.toFixed(2)}</td>
+      </tr>`;
+    });
+    rows += `<tr class="report-total">
+      <td>Total</td>
+      <td style="text-align:right">$${totThis.toFixed(2)}</td>
+      <td style="text-align:right">$${totLast.toFixed(2)}</td>
+      <td style="text-align:right">$${tot12.toFixed(2)}</td>
+    </tr>`;
+    tbody.innerHTML = rows;
+  }
+}
+
+async function refreshReport(id) {
+  const btn = document.getElementById('rpt-refresh-btn-' + id);
+  if (btn) { btn.classList.add('spinning'); btn.disabled = true; }
+  try {
+    const r = await fetch(API + '/api/reports/' + id + '/refresh', { method: 'POST' });
+    const d = await r.json();
+    if (d.data) {
+      await loadReportData(id, d.data);
+      const ts = document.getElementById('rpt-refresh-ts-' + id);
+      if (ts && d.refreshed_at) ts.textContent = 'Updated ' + _fmtRelTime(d.refreshed_at);
+    }
+  } finally {
+    if (btn) { btn.classList.remove('spinning'); btn.disabled = false; }
+  }
+}
+
+async function deleteReport(id) {
+  if (!await showConfirm('Delete this report?', 'Delete', true)) return;
+  await fetch(API + '/api/reports/' + id, { method: 'DELETE' });
+  fetchReports();
+}
+
+function _populateAddReportModal() {
+  const typeSelect = document.getElementById('add-report-type');
+  typeSelect.innerHTML = Object.entries(_reportTypes).map(([id, t]) =>
+    `<option value="${id}">${esc(t.label)}</option>`
+  ).join('') || '<option value="infra-spend">Infrastructure Spend</option>';
+  _updateAddReportVendors();
+}
+function _updateAddReportVendors() {
+  const typeId = document.getElementById('add-report-type').value;
+  const vendors = _reportTypes[typeId]?.vendors || {};
+  const grp = document.getElementById('add-report-vendors-group');
+  const entries = Object.entries(vendors);
+  if (!entries.length) { grp.style.display = 'none'; return; }
+  grp.style.display = '';
+  grp.querySelector('div').innerHTML = entries.map(([vid, vm]) =>
+    `<label style="display:flex;align-items:center;gap:5px;font-size:0.82rem;">` +
+    `<input type="checkbox" value="${vid}" checked> ${esc(vm.label)}</label>`
+  ).join('');
+}
+function openAddReport() {
+  _populateAddReportModal();
+  document.getElementById('add-report-overlay').style.display = 'flex';
+  document.getElementById('add-report-name').focus();
+}
+function closeAddReport() {
+  document.getElementById('add-report-overlay').style.display = 'none';
+}
+async function submitAddReport() {
+  const name = document.getElementById('add-report-name').value.trim() || 'New Report';
+  const type = document.getElementById('add-report-type').value;
+  const vendors = [...document.querySelectorAll('#add-report-vendors-group input[type=checkbox]:checked')].map(c=>c.value);
+  closeAddReport();
+  await fetch(API + '/api/reports', {
+    method: 'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, type, config:{vendors}})
+  });
+  fetchReports();
+}
+
+function _fmtRelTime(ts) {
+  const diff = Math.floor(Date.now()/1000) - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago';
+  return Math.floor(diff/86400) + 'd ago';
+}
+
 // ═══════ BOARD ═══════
 let activeView = 'sessions';
 let boardItems = [];
@@ -7343,6 +7826,7 @@ function switchView(view) {
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
   document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
+  if (view === 'reports') fetchReports();
   if (view === 'board') {
     renderBoard();
     fetchBoard();
@@ -9725,6 +10209,7 @@ function forceUpdate() {
 })();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
@@ -10718,7 +11203,104 @@ class CCHandler(BaseHTTPRequestHandler):
                 self._json({"deleted": sched_id})
                 return
 
-        # GET /api/calendar.ics — iCal subscription feed
+        # ── Reports API ───────────────────────────────────────────────────────
+        if path == "/api/reports" or path.startswith("/api/reports/"):
+            import json as _json_r, time as _tr, urllib.request as _ur, urllib.error as _ue
+            db = get_db()
+
+            def _reports_list():
+                rows = db.execute(
+                    "SELECT id,name,type,config,position,created,last_refresh FROM reports ORDER BY position,created"
+                ).fetchall()
+                return [dict(r) for r in rows]
+
+            # GET /api/reports/types — return registry metadata (no fetch fns)
+            if method == "GET" and path == "/api/reports/types":
+                out = {}
+                for type_id, type_meta in _REPORT_TYPE_REGISTRY.items():
+                    vendors_out = {}
+                    for vid, vm in type_meta.get("vendors", {}).items():
+                        vendors_out[vid] = {k: v for k, v in vm.items() if k != "fetch"}
+                    out[type_id] = {
+                        "label": type_meta.get("label", type_id),
+                        "description": type_meta.get("description", ""),
+                        "vendors": vendors_out,
+                    }
+                return self._json(out)
+
+            # GET /api/reports
+            if method == "GET" and path == "/api/reports":
+                return self._json(_reports_list())
+
+            # POST /api/reports — create report
+            if method == "POST" and path == "/api/reports":
+                body_d = _json_r.loads(body or b"{}")
+                name = body_d.get("name","New Report").strip()
+                rtype = body_d.get("type","infra-spend")
+                config = _json_r.dumps(body_d.get("config",{}))
+                pos = body_d.get("position", 0)
+                rid = f"rpt-{int(_tr.time()*1000)}"
+                now = int(_tr.time())
+                db.execute("INSERT INTO reports (id,name,type,config,position,created) VALUES (?,?,?,?,?,?)",
+                           (rid, name, rtype, config, pos, now))
+                db.commit()
+                row = db.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+                return self._json(dict(row), 201)
+
+            # DELETE /api/reports/<id>
+            del_m = re.match(r"^/api/reports/([A-Za-z0-9_-]+)$", path)
+            if method == "DELETE" and del_m:
+                rid = del_m.group(1)
+                db.execute("DELETE FROM reports WHERE id=?", (rid,))
+                db.commit()
+                return self._json({"ok":True})
+
+            # PATCH /api/reports/<id> — rename
+            if method == "PATCH" and del_m:
+                rid = del_m.group(1)
+                body_d = _json_r.loads(body or b"{}")
+                if "name" in body_d:
+                    db.execute("UPDATE reports SET name=? WHERE id=?", (body_d["name"], rid))
+                    db.commit()
+                row = db.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+                return self._json(dict(row) if row else {"error":"not found"}, 200 if row else 404)
+
+            # POST /api/reports/<id>/refresh — fetch live data from all vendors
+            refresh_m = re.match(r"^/api/reports/([A-Za-z0-9_-]+)/refresh$", path)
+            if method == "POST" and refresh_m:
+                rid = refresh_m.group(1)
+                row = db.execute("SELECT * FROM reports WHERE id=?", (rid,)).fetchone()
+                if not row:
+                    return self._json({"error":"not found"}, 404)
+                cfg = _json_r.loads(row["config"] or "{}")
+                rtype = row["type"]
+                type_meta = _REPORT_TYPE_REGISTRY.get(rtype, {})
+                all_vendors = type_meta.get("vendors", {})
+                vendor_ids = cfg.get("vendors", list(all_vendors.keys()))
+                results = {}
+                for v in vendor_ids:
+                    vm = all_vendors.get(v)
+                    if vm and "fetch" in vm:
+                        results[v] = vm["fetch"](cfg)
+                    else:
+                        results[v] = {"name":v,"error":"unknown vendor","daily":[],"monthly":[]}
+                now = int(_tr.time())
+                db.execute("UPDATE reports SET last_refresh=?, cached_data=? WHERE id=?",
+                           (now, _json_r.dumps(results), rid))
+                db.commit()
+                return self._json({"ok":True, "data":results, "refreshed_at":now})
+
+            # GET /api/reports/<id>/data — return cached data
+            data_m = re.match(r"^/api/reports/([A-Za-z0-9_-]+)/data$", path)
+            if method == "GET" and data_m:
+                rid = data_m.group(1)
+                row = db.execute("SELECT cached_data, last_refresh FROM reports WHERE id=?", (rid,)).fetchone()
+                if not row:
+                    return self._json({"error":"not found"}, 404)
+                cached = _json_r.loads(row["cached_data"] or "{}") if row["cached_data"] else {}
+                return self._json({"data":cached,"refreshed_at":row["last_refresh"]})
+
+                # GET /api/calendar.ics — iCal subscription feed
         if method == "GET" and path == "/api/calendar.ics":
             ical_text = _generate_ical()
             body = ical_text.encode("utf-8")
