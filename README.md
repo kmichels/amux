@@ -1,4 +1,4 @@
-# amux — Claude Code Multiplexer
+<img src="github-header.svg" alt="amux — Claude Code Multiplexer" width="1280"/>
 
 Run dozens of Claude Code agents in parallel, unattended, from your browser or phone. No build step, no external services — just Python 3 and tmux.
 

@@ -27,8 +27,9 @@
     "playwright": {
       "command": "npx",
       "args": [
-        "@playwright/mcp",
+        "@playwright/mcp@latest",
         "--headless",
+        "--ignore-https-errors",
         "--user-data-dir",
         "${HOME}/.amux/playwright-auth/profile"
       ]
