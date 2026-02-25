@@ -8137,8 +8137,11 @@ function renderReports(reports) {
       </div>
     </div>
   `).join('');
-  // Auto-load cached data for each report
-  reports.forEach(r => loadReportData(r.id, null));
+  // Show cached data immediately, then auto-refresh in background
+  reports.forEach(r => {
+    loadReportData(r.id, null);
+    refreshReport(r.id);
+  });
 }
 
 async function loadReportData(id, data) {
