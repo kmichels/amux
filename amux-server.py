@@ -12002,6 +12002,60 @@ class CCHandler(BaseHTTPRequestHandler):
 
 
 # ═══════════════════════════════════════════
+# AUTO-UPDATE FROM GITHUB
+# ═══════════════════════════════════════════
+
+_AUTO_UPDATE_REPO = os.environ.get("AMUX_AUTO_UPDATE_REPO", "")   # e.g. "mixpeek/amux"
+_AUTO_UPDATE_BRANCH = os.environ.get("AMUX_AUTO_UPDATE_BRANCH", "main")
+_AUTO_UPDATE_INTERVAL = int(os.environ.get("AMUX_AUTO_UPDATE_INTERVAL", "60"))  # seconds
+
+
+def _auto_update_loop():
+    """Poll GitHub for changes to amux-server.py and overwrite self if newer.
+    The existing file-watcher thread detects the mtime change and restarts."""
+    repo = _AUTO_UPDATE_REPO
+    branch = _AUTO_UPDATE_BRANCH
+    script = Path(__file__).resolve()
+    last_sha = None
+    api_url = f"https://api.github.com/repos/{repo}/commits?path=amux-server.py&sha={branch}&per_page=1"
+    raw_url = f"https://raw.githubusercontent.com/{repo}/{branch}/amux-server.py"
+    import urllib.request as _ur, ast as _ast
+    slog(f"[auto-update] watching {repo}@{branch} every {_AUTO_UPDATE_INTERVAL}s")
+    while True:
+        time.sleep(_AUTO_UPDATE_INTERVAL)
+        try:
+            # Check latest commit SHA for the file
+            req = _ur.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
+            with _ur.urlopen(req, timeout=10) as resp:
+                commits = json.loads(resp.read())
+            if not commits:
+                continue
+            sha = commits[0]["sha"]
+            if last_sha is None:
+                last_sha = sha
+                continue  # first poll — just record, don't update
+            if sha == last_sha:
+                continue
+            # New commit — download the raw file
+            slog(f"[auto-update] new commit {sha[:8]}, downloading...")
+            with _ur.urlopen(raw_url, timeout=30) as resp:
+                new_content = resp.read()
+            # Validate Python syntax before overwriting
+            try:
+                _ast.parse(new_content)
+            except SyntaxError as e:
+                slog(f"[auto-update] SKIP — syntax error in remote file: {e}")
+                last_sha = sha  # don't re-check this commit
+                continue
+            # Overwrite self — file watcher will detect mtime change and restart
+            script.write_bytes(new_content)
+            last_sha = sha
+            slog(f"[auto-update] updated to {sha[:8]} — file watcher will restart")
+        except Exception as e:
+            slog(f"[auto-update] error: {e}")
+
+
+# ═══════════════════════════════════════════
 # SERVER STARTUP & FILE WATCHER
 # ═══════════════════════════════════════════
 
@@ -12229,6 +12283,9 @@ def main():
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
     # Start schedule runner thread
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # Start auto-update thread (if configured)
+    if _AUTO_UPDATE_REPO:
+        threading.Thread(target=_auto_update_loop, daemon=True).start()
 
     try:
         server.serve_forever()
