@@ -3307,6 +3307,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
+  /* Peek compact mode — when visual viewport is constrained (pinch zoom / keyboard) */
+  .overlay.vv-compact .peek-cmd-row .chips { display: none !important; }
+  .overlay.vv-compact .peek-dir-bar { display: none; }
+  .overlay.vv-compact .peek-tabs { padding: 0 8px; }
+  .overlay.vv-compact .peek-tab { padding: 4px 10px; font-size: 0.75rem; }
+  .overlay.vv-compact .overlay-header { padding-bottom: 4px !important; gap: 2px !important; }
+  .overlay.vv-compact .peek-cmd-toggle { padding: 3px; }
+  .overlay.vv-compact .peek-cmd-row .send-input { min-height: 30px; padding: 4px 8px; font-size: 0.8rem; }
+  .overlay.vv-compact .peek-cmd-row .btn { min-height: 30px; padding: 4px 10px; }
+  .overlay.vv-compact .peek-attach-btn { min-height: 30px; }
+
   /* Peek command bar */
   .peek-cmd-bar { flex-shrink: 0; }
   .peek-cmd-toggle {
@@ -3763,6 +3774,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
   .board-card-tag { background: rgba(139,148,158,0.1); color: var(--dim); border: 1px solid rgba(139,148,158,0.15); }
+  /* Tag input widget (used in add-issue modal and detail view) */
+  .be-tag-wrap {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px;
+    min-height: 34px; cursor: text; background: var(--input-bg, var(--bg));
+    transition: border-color 0.15s;
+  }
+  .be-tag-wrap:focus-within { border-color: var(--accent); }
+  .be-tag-chip {
+    display: inline-flex; align-items: center; gap: 3px;
+    background: rgba(88,166,255,0.12); color: var(--accent);
+    border: 1px solid rgba(88,166,255,0.25); border-radius: 4px;
+    padding: 2px 6px; font-size: 0.7rem; white-space: nowrap;
+  }
+  .be-tag-chip-remove { cursor: pointer; opacity: 0.55; line-height: 1; padding: 0 1px; }
+  .be-tag-chip-remove:hover { opacity: 1; }
+  .be-tag-input {
+    border: none; outline: none; background: none;
+    color: var(--text); font-size: 0.82rem; min-width: 80px; flex: 1; padding: 0;
+    font-family: inherit;
+  }
+  .be-tag-suggestions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .be-tag-suggestion {
+    font-size: 0.7rem; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+    background: rgba(139,148,158,0.08); color: var(--dim);
+    border: 1px solid rgba(139,148,158,0.12); transition: background 0.12s, color 0.12s;
+  }
+  .be-tag-suggestion:hover { background: rgba(88,166,255,0.1); color: var(--accent); border-color: rgba(88,166,255,0.2); }
   .board-card-session {
     background: rgba(88,166,255,0.08); color: var(--accent); font-weight: 500;
     border: 1px solid rgba(88,166,255,0.18); overflow: hidden; text-overflow: ellipsis; max-width: 90px;
@@ -4396,6 +4435,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="field-label">Notes <span class="field-optional">(optional)</span></label>
       <textarea id="be-desc" placeholder="Add details or context..."></textarea>
     </div>
+    <div class="field-group">
+      <label class="field-label">Tags <span class="field-optional">(optional)</span></label>
+      <div class="be-tag-wrap" id="be-tag-wrap" onclick="document.getElementById('be-tag-input').focus()">
+        <input id="be-tag-input" class="be-tag-input" type="text" placeholder="Add tag…"
+          autocomplete="off" autocorrect="off" autocapitalize="none"
+          oninput="_beTagInputUpdate('be')"
+          onkeydown="_beTagKeydown(event,'be')">
+      </div>
+      <div id="be-tag-suggestions" class="be-tag-suggestions"></div>
+    </div>
     <div class="field-group" id="be-session-row">
       <label class="field-label">Session <span class="field-optional">(optional)</span></label>
       <select id="be-session-add"></select>
@@ -4438,6 +4487,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span style="font-size:0.78rem;color:var(--dim);">Due:</span>
       <input type="date" id="bd-due" class="board-detail-session-select" style="flex:1;cursor:pointer;">
       <input type="time" id="bd-due-time" class="board-detail-session-select" style="width:110px;cursor:pointer;" title="Time (optional — leave blank for all-day)">
+    </div>
+    <div class="board-detail-row" style="align-items:flex-start;">
+      <span style="font-size:0.78rem;color:var(--dim);padding-top:7px;">Tags:</span>
+      <div style="flex:1;">
+        <div class="be-tag-wrap" id="bd-tag-wrap" onclick="document.getElementById('bd-tag-input').focus()">
+          <input id="bd-tag-input" class="be-tag-input" type="text" placeholder="Add tag…"
+            autocomplete="off" autocorrect="off" autocapitalize="none"
+            oninput="_beTagInputUpdate('bd')"
+            onkeydown="_beTagKeydown(event,'bd')">
+        </div>
+        <div id="bd-tag-suggestions" class="be-tag-suggestions"></div>
+      </div>
     </div>
     <div class="board-detail-tabs">
       <button class="board-detail-tab active" id="bd-tab-edit" onclick="boardDetailTab('edit')">Edit</button>
@@ -6409,13 +6470,16 @@ function _syncPeekOverlayToVisualViewport() {
   const ov = document.getElementById('peek-overlay');
   if (!window.visualViewport || !ov) return;
   const vv = window.visualViewport;
-  if (vv.height < window.innerHeight - 1 || vv.offsetTop > 1) {
+  const constrained = vv.height < window.innerHeight - 1 || vv.offsetTop > 1;
+  if (constrained) {
     ov.style.height = vv.height + 'px';
     ov.style.top = vv.offsetTop + 'px';
   } else {
     ov.style.height = '';
     ov.style.top = '';
   }
+  // Compact mode: hide chips, shrink padding when viewport is tight
+  ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
 }
 (function() {
   if (!window.visualViewport) return;
@@ -9112,6 +9176,62 @@ function renderMarkdown(raw) {
   }).join('');
 }
 
+// ── Tag input widget (shared by add-modal "be" and detail view "bd") ──
+const _tagState = { be: [], bd: [] };
+
+function _beTagRenderChips(prefix) {
+  const tags = _tagState[prefix];
+  const wrap = document.getElementById(prefix + '-tag-wrap');
+  const inp = document.getElementById(prefix + '-tag-input');
+  if (!wrap || !inp) return;
+  [...wrap.children].forEach(c => { if (c !== inp) c.remove(); });
+  tags.forEach(t => {
+    const chip = document.createElement('span');
+    chip.className = 'be-tag-chip';
+    chip.innerHTML = esc(t) + '<span class="be-tag-chip-remove" onclick="event.stopPropagation();_beTagRemove(' + JSON.stringify(prefix) + ',' + JSON.stringify(t) + ')">\u00d7</span>';
+    wrap.insertBefore(chip, inp);
+  });
+  inp.placeholder = tags.length ? '' : 'Add tag\u2026';
+}
+
+function _beTagInputUpdate(prefix) {
+  const inp = document.getElementById(prefix + '-tag-input');
+  const q = inp ? inp.value.toLowerCase() : '';
+  const allTags = [...new Set(boardItems.flatMap(i => i.tags || []))].sort();
+  const suggestions = allTags.filter(t => !_tagState[prefix].includes(t) && (!q || t.toLowerCase().includes(q)));
+  const el = document.getElementById(prefix + '-tag-suggestions');
+  if (!el) return;
+  el.innerHTML = suggestions.map(t =>
+    '<button class="be-tag-suggestion" onclick="_beTagAdd(' + JSON.stringify(prefix) + ',' + JSON.stringify(t) + ');document.getElementById(' + JSON.stringify(prefix + '-tag-input') + ').value=\'\';_beTagInputUpdate(' + JSON.stringify(prefix) + ')">' + esc(t) + '</button>'
+  ).join('');
+}
+
+function _beTagAdd(prefix, tag) {
+  tag = tag.trim().replace(/,/g, '');
+  if (!tag || _tagState[prefix].includes(tag)) return;
+  _tagState[prefix].push(tag);
+  _beTagRenderChips(prefix);
+  _beTagInputUpdate(prefix);
+}
+
+function _beTagRemove(prefix, tag) {
+  _tagState[prefix] = _tagState[prefix].filter(t => t !== tag);
+  _beTagRenderChips(prefix);
+  _beTagInputUpdate(prefix);
+}
+
+function _beTagKeydown(e, prefix) {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    const val = e.target.value.trim().replace(/,/g, '');
+    if (val) { _beTagAdd(prefix, val); e.target.value = ''; _beTagInputUpdate(prefix); }
+  } else if (e.key === 'Backspace' && !e.target.value && _tagState[prefix].length) {
+    _tagState[prefix].pop();
+    _beTagRenderChips(prefix);
+    _beTagInputUpdate(prefix);
+  }
+}
+
 function renderBoardFilters() {
   const el = document.getElementById('board-filters');
   if (!el) return;
@@ -9581,6 +9701,9 @@ function openBoardAdd(statusOrDate, prefillDate) {
   sel.innerHTML = boardStatuses.map(s => '<option value="' + s.id + '">' + esc(s.label) + '</option>').join('');
   sel.value = status;
   _populateSessionSelect('be-session-add', peekSession || '');
+  _tagState['be'] = [];
+  _beTagRenderChips('be');
+  _beTagInputUpdate('be');
   document.getElementById('board-edit-overlay').classList.add('active');
   document.getElementById('be-title').focus();
 }
@@ -9597,8 +9720,7 @@ async function saveBoardEdit() {
   const status = document.getElementById('be-status').value;
   const sel = document.getElementById('be-session-add');
   const session = sel ? sel.value : '';
-  const sess = sessions.find(s => s.name === session);
-  const tags = sess ? (sess.tags || []) : [];
+  const tags = [..._tagState['be']];
   const dueEl = document.getElementById('be-due');
   const due = dueEl ? dueEl.value : '';
   const dueTimeEl = document.getElementById('be-due-time');
@@ -9634,10 +9756,11 @@ function openBoardDetail(id) {
   const dueTimeEl = document.getElementById('bd-due-time');
   if (dueTimeEl) dueTimeEl.value = draft ? (draft.due_time || '') : (item.due_time || '');
   boardDetailTab('edit');
+  _tagState['bd'] = [...(item.tags || [])];
+  _beTagRenderChips('bd');
+  _beTagInputUpdate('bd');
   const meta = document.getElementById('bd-meta');
   const parts = [];
-  const tags = item.tags || [];
-  if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
   if (item.creator) parts.push('From ' + esc(item.creator));
   if (item.created) parts.push('Created ' + timeAgo(item.created));
   if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
@@ -9752,15 +9875,8 @@ async function boardDetailSave() {
   document.getElementById('bd-save-status').textContent = 'Saving...';
   const dueInput = document.getElementById('bd-due');
   const dueTimeInput = document.getElementById('bd-due-time');
-  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '' };
-  if (session !== undefined) {
-    changes.session = session;
-    const item = boardItems.find(i => i.id === boardDetailId);
-    if (item && item.session !== session) {
-      const sess = sessions.find(s => s.name === session);
-      changes.tags = sess ? (sess.tags || []) : [];
-    }
-  }
+  const changes = { title, desc, status: boardDetailStatus, due: dueInput ? dueInput.value : '', due_time: dueTimeInput ? dueTimeInput.value : '', tags: [..._tagState['bd']] };
+  if (session !== undefined) changes.session = session;
   await updateBoardItem(boardDetailId, changes);
   delete _boardDrafts[boardDetailId];
   document.getElementById('bd-save-status').textContent = 'Saved';
@@ -9772,8 +9888,6 @@ async function boardDetailSave() {
   if (item) {
     const meta = document.getElementById('bd-meta');
     const parts = [];
-    const tags = item.tags || [];
-    if (tags.length) parts.push('Tags: ' + tags.map(t => '<span class="board-card-tag" data-tag="' + esc(t) + '">' + esc(t) + '</span>').join(' '));
     if (item.creator) parts.push('From ' + esc(item.creator));
     if (item.created) parts.push('Created ' + timeAgo(item.created));
     if (item.updated && item.updated !== item.created) parts.push('Updated ' + timeAgo(item.updated));
