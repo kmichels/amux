@@ -3262,6 +3262,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .settings-server-url { font-size: 0.65rem; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .settings-server-badge { font-size: 0.6rem; color: var(--accent); flex-shrink: 0; margin-left: 6px; }
 
+  /* Logs tab */
+  .logs-toolbar { display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap; }
+  .lf-btn { font-size:0.68rem;padding:2px 8px;border-radius:10px;border:1px solid var(--border);background:none;color:var(--dim);cursor:pointer;transition:all 0.15s; }
+  .lf-btn:hover { color:var(--fg);border-color:var(--fg); }
+  .lf-btn.active { background:var(--accent);color:#000;border-color:var(--accent); }
+  .logs-subtabs { display:flex;gap:0;border-bottom:1px solid var(--border);flex-shrink:0; }
+  .lst-btn { flex:1;text-align:center;padding:6px 0;font-size:0.72rem;border:none;background:none;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;transition:all 0.15s; }
+  .lst-btn:hover { color:var(--fg); }
+  .lst-btn.active { color:var(--accent);border-bottom-color:var(--accent); }
+  .log-evt { padding:8px 0;border-bottom:1px solid var(--border-subtle,rgba(255,255,255,0.04)); display:flex;gap:10px;align-items:flex-start; }
+  .log-evt-icon { width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:0.8rem;flex-shrink:0; }
+  .log-evt-body { flex:1;min-width:0; }
+  .log-evt-title { font-size:0.78rem;font-weight:500; }
+  .log-evt-detail { font-size:0.68rem;color:var(--dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+  .log-evt-time { font-size:0.6rem;color:var(--dim);flex-shrink:0;white-space:nowrap; }
+  .log-evt-cat { font-size:0.55rem;padding:1px 5px;border-radius:6px;border:1px solid var(--border);color:var(--dim);flex-shrink:0; }
+  .stat-card { background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px; }
+  .stat-card-label { font-size:0.7rem;color:var(--dim);margin-bottom:4px; }
+  .stat-card-value { font-size:1.4rem;font-weight:600; }
+  .stat-row { display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:0.72rem; }
+  .stat-row-bar { height:4px;border-radius:2px;background:var(--accent);margin-top:2px; }
+
   /* Peek find bar */
   .peek-find-wrap { position: relative; display: flex; align-items: center; gap: 0; }
   .peek-find-wrap .search-input { padding-right: 120px; min-width: 180px; }
@@ -4093,9 +4115,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')" style="display:none;">Notifications</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
+  <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
-  <button id="tab-logs" onclick="switchView('logs')">Logs</button>
 </div>
 <div id="session-view">
 <div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
@@ -4204,51 +4226,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Logs view -->
-<div id="logs-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
-  <!-- toolbar: sub-tabs + filters + search -->
-  <div class="logs-toolbar">
-    <div class="logs-subtabs">
-      <button class="logs-subtab active" id="lst-activity" onclick="logsSetTab('activity')">Activity</button>
-      <button class="logs-subtab" id="lst-raw" onclick="logsSetTab('raw')">Raw Logs</button>
-      <button class="logs-subtab" id="lst-stats" onclick="logsSetTab('stats')">Stats</button>
-    </div>
-    <div id="logs-filter-bar" class="logs-filter-bar">
-      <button class="lf-btn active" onclick="logsSetFilter(this,'')">All</button>
-      <button class="lf-btn" onclick="logsSetFilter(this,'board')">Board</button>
-      <button class="lf-btn" onclick="logsSetFilter(this,'session')">Sessions</button>
-      <button class="lf-btn" onclick="logsSetFilter(this,'memory')">Memory</button>
-      <button class="lf-btn" onclick="logsSetFilter(this,'file')">Files</button>
-      <button class="lf-btn" onclick="logsSetFilter(this,'http')">HTTP</button>
-    </div>
-    <input id="logs-search" class="logs-search" type="text" placeholder="Search..." autocomplete="off" oninput="logsSearchQuery=this.value;renderActivity()">
-    <button class="btn" onclick="fetchLogs()" style="font-size:0.75rem;padding:3px 10px;" title="Refresh">&#x21BB;</button>
-  </div>
-  <!-- Activity feed -->
-  <div id="logs-panel-activity" class="logs-panel" style="flex:1;overflow-y:auto;">
-    <div id="logs-activity-body" class="logs-activity-body"></div>
-  </div>
-  <!-- Raw log viewer -->
-  <div id="logs-panel-raw" class="logs-panel" style="display:none;flex:1;min-height:0;flex-direction:column;">
-    <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0;">
-      <label style="font-size:0.75rem;color:var(--dim);">Lines:</label>
-      <select id="raw-lines-sel" onchange="fetchRawLogs()" style="font-size:0.75rem;padding:2px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;">
-        <option value="100">100</option>
-        <option value="300" selected>300</option>
-        <option value="500">500</option>
-        <option value="1000">1000</option>
-      </select>
-      <input id="raw-filter" type="text" placeholder="Filter lines..." autocomplete="off" style="flex:1;font-size:0.75rem;padding:3px 8px;" oninput="renderRawLogs()">
-      <span id="raw-line-count" style="font-size:0.7rem;color:var(--dim);white-space:nowrap;"></span>
-    </div>
-    <div style="flex:1;overflow-y:auto;"><pre id="logs-raw-body" class="logs-raw-body"></pre></div>
-  </div>
-  <!-- Stats -->
-  <div id="logs-panel-stats" class="logs-panel" style="display:none;flex:1;overflow-y:auto;">
-    <div id="logs-stats-body" style="padding:14px;display:flex;flex-direction:column;gap:12px;"></div>
-  </div>
-</div>
-
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
   <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0;">
     <div id="files-breadcrumb" style="flex:1;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:nowrap;"></div>
@@ -4257,6 +4234,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" id="files-hidden-btn" onclick="toggleFilesHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
   </div>
   <div id="files-body" style="flex:1;overflow-y:auto;padding:0;"></div>
+</div>
+
+<div id="logs-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div class="logs-toolbar">
+    <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+      <button class="lf-btn active" data-cat="" onclick="logsSetFilter(this,'')">All</button>
+      <button class="lf-btn" data-cat="board" onclick="logsSetFilter(this,'board')">Board</button>
+      <button class="lf-btn" data-cat="session" onclick="logsSetFilter(this,'session')">Sessions</button>
+      <button class="lf-btn" data-cat="memory" onclick="logsSetFilter(this,'memory')">Memory</button>
+      <button class="lf-btn" data-cat="files" onclick="logsSetFilter(this,'files')">Files</button>
+      <button class="lf-btn" data-cat="http" onclick="logsSetFilter(this,'http')">HTTP</button>
+    </div>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input id="logs-search" class="search-input" type="text" placeholder="Search..." style="width:140px;font-size:0.72rem;padding:4px 8px;" oninput="logsSearchQuery=this.value;renderActivity()">
+      <button class="btn" title="Refresh" onclick="fetchLogs()" style="font-size:0.7rem;padding:2px 6px;">&#x21BB;</button>
+    </div>
+  </div>
+  <div class="logs-subtabs">
+    <button id="lst-activity" class="lst-btn active" onclick="logsSetTab('activity')">Activity</button>
+    <button id="lst-raw" class="lst-btn" onclick="logsSetTab('raw')">Raw Logs</button>
+    <button id="lst-stats" class="lst-btn" onclick="logsSetTab('stats')">Stats</button>
+  </div>
+  <div id="logs-activity" style="flex:1;overflow-y:auto;padding:0 12px 12px;">
+    <div id="logs-activity-body"></div>
+  </div>
+  <div id="logs-raw" style="display:none;flex:1;overflow-y:auto;padding:0 12px 12px;">
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;">
+      <input id="raw-filter" class="search-input" type="text" placeholder="Filter lines..." style="flex:1;font-size:0.72rem;padding:4px 8px;" oninput="renderRawLogs()">
+      <span id="raw-line-count" style="font-size:0.65rem;color:var(--dim);white-space:nowrap;"></span>
+    </div>
+    <pre id="logs-raw-body" style="font-size:0.68rem;line-height:1.5;margin:0;white-space:pre-wrap;word-break:break-all;color:var(--fg);"></pre>
+  </div>
+  <div id="logs-stats" style="display:none;flex:1;overflow-y:auto;padding:8px 12px;">
+    <div id="logs-stats-body"></div>
+  </div>
 </div>
 
 <div id="browser-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
@@ -8700,27 +8712,29 @@ function _evtTitle(evt) {
 }
 
 async function fetchLogs() {
-  const filt = _logsFilter ? '&filter=' + encodeURIComponent(_logsFilter) : '';
+  const params = ['limit=500'];
+  if (_logsFilter) params.push('category=' + encodeURIComponent(_logsFilter));
   try {
-    const r = await fetch(API + '/api/logs?type=events&limit=500' + filt);
+    const r = await fetch(API + '/api/logs?' + params.join('&'));
     if (!r.ok) return;
     const d = await r.json();
-    _logsEvents = d.events || [];
+    _logsEvents = (d.events || []).map(e => ({
+      ...e, type: e.category, target: e.detail, ip: e.actor,
+      status: e.level === 'error' ? 500 : 200,
+    }));
     renderActivity();
     if (_logsSubtab === 'stats') renderStats();
   } catch(e) {}
 }
 
 async function fetchRawLogs() {
-  const lines = document.getElementById('raw-lines-sel')?.value || '300';
   try {
-    const r = await fetch(API + '/api/logs?type=raw&lines=' + lines);
+    const r = await fetch(API + '/api/logs/raw?lines=300');
     if (!r.ok) return;
     const d = await r.json();
-    _logsRaw = d.raw || '';
-    _logsRawLines = _logsRaw.split('\n');
+    _logsRawLines = d.lines || [];
     const cnt = document.getElementById('raw-line-count');
-    if (cnt) cnt.textContent = (d.raw_total_lines||0).toLocaleString() + ' total lines';
+    if (cnt) cnt.textContent = (d.total||0).toLocaleString() + ' total lines';
     renderRawLogs();
   } catch(e) {}
 }
@@ -8892,13 +8906,9 @@ function logsSetTab(tab) {
   _logsSubtab = tab;
   ['activity','raw','stats'].forEach(t => {
     document.getElementById('lst-' + t)?.classList.toggle('active', t === tab);
-    const p = document.getElementById('logs-panel-' + t);
-    if (p) p.style.display = t === tab ? 'flex' : 'none';
+    const p = document.getElementById('logs-' + t);
+    if (p) p.style.display = t === tab ? '' : 'none';
   });
-  const fb = document.getElementById('logs-filter-bar');
-  if (fb) fb.style.display = tab === 'activity' ? 'flex' : 'none';
-  const ls = document.getElementById('logs-search');
-  if (ls) ls.style.display = tab === 'activity' ? '' : 'none';
   if (tab === 'raw') fetchRawLogs();
   else if (tab === 'stats') { fetchLogs(); }
   else renderActivity();
@@ -10601,6 +10611,17 @@ function connectSSE() {
           if (activeView === 'board') renderBoard();
           else if (activeView === 'calendar') renderCalendar();
         }
+      } else if (msg.type === 'logs' && activeView === 'logs') {
+        // Merge new events into the local array (newest first display)
+        const newEvts = (msg.payload || []).map(e => ({
+          ...e, type: e.type || e.category, target: e.detail, ip: e.actor || e.ip,
+          status: e.level === 'error' ? 500 : (e.status || 200),
+        }));
+        if (newEvts.length) {
+          _logsEvents = newEvts.concat(_logsEvents);
+          if (_logsEvents.length > 2000) _logsEvents = _logsEvents.slice(0, 2000);
+          renderActivity();
+        }
       }
     } catch(err) { console.error('SSE parse:', err); }
   };
@@ -11704,6 +11725,7 @@ class CCHandler(BaseHTTPRequestHandler):
         last_sessions_json = ""
         last_board_json = ""
         heartbeat_counter = 0
+        log_cursor = len(_event_log)  # start from current position
 
         try:
             while True:
@@ -11731,6 +11753,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 if bc["json"] != last_board_json:
                     last_board_json = bc["json"]
                     self.wfile.write(f"data: {json.dumps({'type': 'board', 'payload': bc['data']})}\n\n".encode())
+                    self.wfile.flush()
+
+                # Log events — push new entries from event ring buffer
+                with _event_log_lock:
+                    ring_len = len(_event_log)
+                if ring_len > log_cursor:
+                    with _event_log_lock:
+                        new_events = list(_event_log)[log_cursor:]
+                    log_cursor = ring_len
+                    self.wfile.write(f"data: {json.dumps({'type': 'logs', 'payload': new_events})}\n\n".encode())
                     self.wfile.flush()
 
                 # Heartbeat every 15s (7-8 iterations at 2s sleep)
@@ -11960,6 +11992,55 @@ class CCHandler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=?", (key, value, value))
             db.commit()
             return self._json({"ok": True, "key": key, "value": value})
+
+        # GET /api/logs — query structured event logs from in-memory ring
+        if method == "GET" and path == "/api/logs":
+            category = qs.get("category", [""])[0]
+            session = qs.get("session", [""])[0]
+            limit = min(int(qs.get("limit", ["200"])[0] or 200), 2000)
+            with _event_log_lock:
+                events = list(_event_log)
+            # Filter
+            if category:
+                events = [e for e in events if e.get("type") == category]
+            if session:
+                events = [e for e in events if e.get("session") == session]
+            events = events[-limit:]
+            events.reverse()  # newest first
+            return self._json({"events": events, "count": len(events)})
+
+        # GET /api/logs/raw — tail server.log
+        if method == "GET" and path == "/api/logs/raw":
+            lines = int(qs.get("lines", ["200"])[0] or 200)
+            try:
+                with open(SERVER_LOG, "r") as f:
+                    all_lines = f.readlines()
+                tail = all_lines[-lines:]
+                return self._json({"lines": [l.rstrip() for l in tail], "total": len(all_lines)})
+            except FileNotFoundError:
+                return self._json({"lines": [], "total": 0})
+
+        # GET /api/logs/stats — aggregated stats from in-memory ring
+        if method == "GET" and path == "/api/logs/stats":
+            with _event_log_lock:
+                events = list(_event_log)
+            by_cat: dict = {}
+            by_session: dict = {}
+            by_action: dict = {}
+            for e in events:
+                t = e.get("type", "")
+                by_cat[t] = by_cat.get(t, 0) + 1
+                s = e.get("session", "")
+                if s:
+                    by_session[s] = by_session.get(s, 0) + 1
+                a = e.get("action", "")
+                by_action[a] = by_action.get(a, 0) + 1
+            return self._json({
+                "total": len(events),
+                "by_category": [{"category": k, "cnt": v} for k, v in sorted(by_cat.items(), key=lambda x: -x[1])],
+                "by_session": [{"session": k, "cnt": v} for k, v in sorted(by_session.items(), key=lambda x: -x[1])[:20]],
+                "by_action": [{"action": k, "cnt": v} for k, v in sorted(by_action.items(), key=lambda x: -x[1])[:20]],
+            })
 
         # POST /api/pull — git pull in the repo directory
         if method == "POST" and path == "/api/pull":
