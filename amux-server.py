@@ -95,6 +95,81 @@ _sse_cache = {
 }
 _SSE_CACHE_TTL = 2  # seconds
 
+# ── Structured event log (in-memory ring buffer, 2 000 events) ─────────────────
+import collections as _col
+_event_log: "collections.deque[dict]" = _col.deque(maxlen=2000)
+_event_log_lock = threading.Lock()
+_req_tl = threading.local()  # per-request enrichment (set by handlers, read by _route)
+
+def _emit_event(etype: str, action: str, target: str = "", session: str = "",
+                detail: str = "", status: int = 200, ip: str = "") -> None:
+    with _event_log_lock:
+        _event_log.append({
+            "ts": time.time(),
+            "type": etype,
+            "action": action,
+            "target": target,
+            "session": session,
+            "detail": detail,
+            "status": status,
+            "ip": ip,
+        })
+
+def _classify_request(method: str, path: str) -> tuple:
+    """Returns (type, action, target, session) from method+path."""
+    # Board
+    if path == "/api/board" and method == "POST":
+        return ("board", "created", "", "")
+    m = re.match(r"^/api/board/([A-Za-z0-9-]+)$", path)
+    if m:
+        iid = m.group(1)
+        if method == "PATCH":   return ("board", "updated",  iid, "")
+        if method == "DELETE":  return ("board", "deleted",  iid, "")
+    m = re.match(r"^/api/board/([A-Za-z0-9-]+)/claim$", path)
+    if m and method == "POST":
+        return ("board", "claimed", m.group(1), "")
+    if path == "/api/board/clear-done" and method == "POST":
+        return ("board", "cleared", "done", "")
+    if path == "/api/board/statuses" and method == "POST":
+        return ("board", "status-added", "", "")
+    m = re.match(r"^/api/board/statuses/([a-z0-9-]+)$", path)
+    if m:
+        sid = m.group(1)
+        if method == "DELETE": return ("board", "status-removed", sid, "")
+        if method == "PATCH":  return ("board", "status-renamed", sid, "")
+    # Sessions
+    if path == "/api/sessions" and method == "POST":
+        return ("session", "created", "", "")
+    m = re.match(r"^/api/sessions/([^/]+)/([^/]+)$", path)
+    if m:
+        sname, sub = m.group(1), m.group(2)
+        if method == "POST"  and sub == "start":  return ("session", "started",      sname, sname)
+        if method == "POST"  and sub == "stop":   return ("session", "stopped",      sname, sname)
+        if method == "POST"  and sub == "send":   return ("session", "message-sent", sname, sname)
+        if method == "PATCH" and sub == "config": return ("session", "configured",   sname, sname)
+        if method == "DELETE":                    return ("session", "deleted",       sname, sname)
+        if method == "POST"  and sub == "memory": return ("memory",  "updated",      sname, sname)
+        if method == "POST"  and sub == "peek":   return ("session", "peeked",       sname, sname)
+    m = re.match(r"^/api/sessions/([^/]+)$", path)
+    if m:
+        sname = m.group(1)
+        if method == "DELETE": return ("session", "deleted", sname, sname)
+        if method == "PATCH":  return ("session", "updated", sname, sname)
+    # Memory
+    if path == "/api/memory/global" and method == "POST":
+        return ("memory", "updated", "global", "")
+    # Uploads
+    if path.startswith("/api/uploads") and method == "POST":
+        return ("file", "uploaded", "", "")
+    # System
+    if path == "/api/pull" and method == "POST":
+        return ("system", "pull", "repo", "")
+    # Generic reads (low-priority)
+    if method == "GET":
+        return ("http", "get", path, "")
+    action_map = {"POST": "post", "PATCH": "patch", "DELETE": "delete"}
+    return ("http", action_map.get(method, method.lower()), path, "")
+
 # Auto-recovery state
 _sse_alerts: list = []           # ring buffer of alert dicts pushed to all SSE clients
 _sse_alert_lock = threading.Lock()
@@ -3521,6 +3596,63 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-bar button:active { opacity: 0.7; }
 
+  /* Logs view */
+  .logs-toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap;
+    background: var(--bg); position: sticky; top: 0; z-index: 10;
+  }
+  .logs-subtabs { display: flex; gap: 2px; flex-shrink: 0; }
+  .logs-subtab {
+    background: transparent; border: none; padding: 4px 11px; font-size: 0.78rem;
+    cursor: pointer; color: var(--dim); border-radius: 6px; font-weight: 500;
+    transition: background 0.12s, color 0.12s;
+  }
+  .logs-subtab.active { background: var(--card); color: var(--text); font-weight: 600; }
+  .logs-subtab:hover:not(.active) { color: var(--text); }
+  .logs-filter-bar { display: flex; gap: 3px; flex: 1; flex-wrap: wrap; min-width: 0; }
+  .lf-btn {
+    background: transparent; border: 1px solid transparent; padding: 2px 8px;
+    font-size: 0.71rem; cursor: pointer; border-radius: 4px; color: var(--dim);
+    transition: background 0.1s, border-color 0.1s, color 0.1s;
+  }
+  .lf-btn.active { border-color: var(--border); background: var(--card); color: var(--text); font-weight: 600; }
+  .lf-btn:hover:not(.active) { color: var(--text); }
+  .logs-search { width: 120px; font-size: 0.78rem; padding: 3px 8px; }
+  .logs-panel { display: flex; flex-direction: column; }
+  .logs-activity-body { padding: 6px 10px; display: flex; flex-direction: column; gap: 1px; }
+  .log-evt {
+    display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px;
+    border-radius: 6px; font-size: 0.8rem; cursor: default;
+    transition: background 0.1s;
+  }
+  .log-evt:hover { background: var(--card); }
+  .log-evt-icon { font-size: 0.88rem; width: 22px; text-align: center; flex-shrink: 0; padding-top: 1px; }
+  .log-evt-body { flex: 1; min-width: 0; }
+  .log-evt-title { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-evt-meta { font-size: 0.69rem; color: var(--dim); margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .log-evt-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.64rem;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .log-evt-ts { color: var(--dim); font-size: 0.69rem; min-width: 52px; text-align: right; flex-shrink: 0; }
+  .logs-day-divider {
+    padding: 8px 8px 3px; font-size: 0.68rem; font-weight: 700; color: var(--dim);
+    letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .logs-raw-body {
+    padding: 10px 14px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.71rem;
+    line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-all; margin: 0;
+  }
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px;
+  }
+  .stat-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 13px 14px;
+  }
+  .stat-card-label { font-size: 0.69rem; color: var(--dim); margin-bottom: 5px; }
+  .stat-card-value { font-size: 1.5rem; font-weight: 700; color: var(--text); }
+
   /* Board */
   .board-search-wrap {
     position: relative; margin-bottom: 4px;
@@ -3963,6 +4095,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
+  <button id="tab-logs" onclick="switchView('logs')">Logs</button>
 </div>
 <div id="session-view">
 <div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
@@ -4068,6 +4201,51 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div style="font-size:2rem;margin-bottom:12px;">🔔</div>
     <div style="font-weight:600;margin-bottom:6px;color:var(--fg);">Notifications</div>
     <div style="color:var(--dim);font-size:0.85rem;">Due date reminders, spend alerts, and agent updates will appear here.</div>
+  </div>
+</div>
+
+<!-- Logs view -->
+<div id="logs-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <!-- toolbar: sub-tabs + filters + search -->
+  <div class="logs-toolbar">
+    <div class="logs-subtabs">
+      <button class="logs-subtab active" id="lst-activity" onclick="logsSetTab('activity')">Activity</button>
+      <button class="logs-subtab" id="lst-raw" onclick="logsSetTab('raw')">Raw Logs</button>
+      <button class="logs-subtab" id="lst-stats" onclick="logsSetTab('stats')">Stats</button>
+    </div>
+    <div id="logs-filter-bar" class="logs-filter-bar">
+      <button class="lf-btn active" onclick="logsSetFilter(this,'')">All</button>
+      <button class="lf-btn" onclick="logsSetFilter(this,'board')">Board</button>
+      <button class="lf-btn" onclick="logsSetFilter(this,'session')">Sessions</button>
+      <button class="lf-btn" onclick="logsSetFilter(this,'memory')">Memory</button>
+      <button class="lf-btn" onclick="logsSetFilter(this,'file')">Files</button>
+      <button class="lf-btn" onclick="logsSetFilter(this,'http')">HTTP</button>
+    </div>
+    <input id="logs-search" class="logs-search" type="text" placeholder="Search..." autocomplete="off" oninput="logsSearchQuery=this.value;renderActivity()">
+    <button class="btn" onclick="fetchLogs()" style="font-size:0.75rem;padding:3px 10px;" title="Refresh">&#x21BB;</button>
+  </div>
+  <!-- Activity feed -->
+  <div id="logs-panel-activity" class="logs-panel" style="flex:1;overflow-y:auto;">
+    <div id="logs-activity-body" class="logs-activity-body"></div>
+  </div>
+  <!-- Raw log viewer -->
+  <div id="logs-panel-raw" class="logs-panel" style="display:none;flex:1;min-height:0;flex-direction:column;">
+    <div style="padding:6px 12px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <label style="font-size:0.75rem;color:var(--dim);">Lines:</label>
+      <select id="raw-lines-sel" onchange="fetchRawLogs()" style="font-size:0.75rem;padding:2px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;">
+        <option value="100">100</option>
+        <option value="300" selected>300</option>
+        <option value="500">500</option>
+        <option value="1000">1000</option>
+      </select>
+      <input id="raw-filter" type="text" placeholder="Filter lines..." autocomplete="off" style="flex:1;font-size:0.75rem;padding:3px 8px;" oninput="renderRawLogs()">
+      <span id="raw-line-count" style="font-size:0.7rem;color:var(--dim);white-space:nowrap;"></span>
+    </div>
+    <div style="flex:1;overflow-y:auto;"><pre id="logs-raw-body" class="logs-raw-body"></pre></div>
+  </div>
+  <!-- Stats -->
+  <div id="logs-panel-stats" class="logs-panel" style="display:none;flex:1;overflow-y:auto;">
+    <div id="logs-stats-body" style="padding:14px;display:flex;flex-direction:column;gap:12px;"></div>
   </div>
 </div>
 
@@ -8452,6 +8630,7 @@ function switchView(view) {
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
+  document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
@@ -8459,8 +8638,10 @@ function switchView(view) {
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
+  document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
   if (view === 'files') loadFiles(_filesPath);
   if (view === 'reports') fetchReports();
+  if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
     fetchBoard();
@@ -8472,6 +8653,272 @@ function switchView(view) {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
 }
+
+// ── Logs tab ──────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+let _logsEvents = [];
+let _logsRaw = '';
+let _logsRawLines = [];
+let _logsFilter = '';
+let _logsSubtab = 'activity';
+let logsSearchQuery = '';
+let _logsTimer = null;
+
+const _LOG_TYPE_CFG = {
+  board:   {icon:'&#x1F4CB;', color:'#1a7f37',        label:'Board'},
+  session: {icon:'&#x26A1;',  color:'var(--accent)',   label:'Session'},
+  memory:  {icon:'&#x1F9E0;', color:'#bc8cff',         label:'Memory'},
+  file:    {icon:'&#x1F4CE;', color:'#ff8c50',         label:'File'},
+  system:  {icon:'&#x2699;',  color:'var(--dim)',       label:'System'},
+  http:    {icon:'&#x1F517;', color:'var(--dim)',       label:'HTTP'},
+};
+const _LOG_ACTION_COLOR = {
+  created:'#1a7f37', started:'#1a7f37', 'status-added':'#1a7f37',
+  updated:'var(--accent)', configured:'var(--accent)', 'message-sent':'var(--accent)', claimed:'var(--accent)',
+  deleted:'var(--red)', 'status-removed':'var(--red)',
+  stopped:'#e07000', cleared:'#7d4e00',
+  uploaded:'#bc8cff', pull:'var(--cyan)',
+};
+
+function _relTime(ts) {
+  const d = Date.now()/1000 - ts;
+  if (d < 5)    return 'now';
+  if (d < 60)   return Math.round(d) + 's ago';
+  if (d < 3600) return Math.round(d/60) + 'm ago';
+  if (d < 86400)return Math.round(d/3600) + 'h ago';
+  return Math.round(d/86400) + 'd ago';
+}
+
+function _evtTitle(evt) {
+  if (evt.detail) return evt.detail;
+  const tc = _LOG_TYPE_CFG[evt.type] || {label: evt.type};
+  if (evt.target && evt.target !== evt.action && evt.target !== evt.type)
+    return tc.label + ': ' + evt.action + ' \u2014 ' + evt.target;
+  return tc.label + ': ' + evt.action;
+}
+
+async function fetchLogs() {
+  const filt = _logsFilter ? '&filter=' + encodeURIComponent(_logsFilter) : '';
+  try {
+    const r = await fetch(API + '/api/logs?type=events&limit=500' + filt);
+    if (!r.ok) return;
+    const d = await r.json();
+    _logsEvents = d.events || [];
+    renderActivity();
+    if (_logsSubtab === 'stats') renderStats();
+  } catch(e) {}
+}
+
+async function fetchRawLogs() {
+  const lines = document.getElementById('raw-lines-sel')?.value || '300';
+  try {
+    const r = await fetch(API + '/api/logs?type=raw&lines=' + lines);
+    if (!r.ok) return;
+    const d = await r.json();
+    _logsRaw = d.raw || '';
+    _logsRawLines = _logsRaw.split('\n');
+    const cnt = document.getElementById('raw-line-count');
+    if (cnt) cnt.textContent = (d.raw_total_lines||0).toLocaleString() + ' total lines';
+    renderRawLogs();
+  } catch(e) {}
+}
+
+function renderRawLogs() {
+  const el = document.getElementById('logs-raw-body');
+  if (!el) return;
+  const filt = (document.getElementById('raw-filter')?.value || '').toLowerCase();
+  const lines = filt ? _logsRawLines.filter(l => l.toLowerCase().includes(filt)) : _logsRawLines;
+  el.innerHTML = lines.map(l => {
+    const isErr = /error|exception|traceback/i.test(l);
+    const isWarn = /warn/i.test(l);
+    const esc = l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (isErr)  return '<span style="color:var(--red)">'  + esc + '</span>';
+    if (isWarn) return '<span style="color:#e07000">' + esc + '</span>';
+    if (/^\d{4}-\d{2}-\d{2}/.test(l)) {
+      // timestamp prefix in dim color
+      const tEnd = l.indexOf(' ', 20);
+      if (tEnd > 0) {
+        const ts = l.slice(0,tEnd);
+        const rest = l.slice(tEnd);
+        return '<span style="color:var(--dim)">' + escHtml(ts) + '</span>' + escHtml(rest);
+      }
+    }
+    return esc;
+  }).join('\n');
+}
+
+function renderActivity() {
+  const el = document.getElementById('logs-activity-body');
+  if (!el) return;
+  let evts = _logsEvents.slice();
+  // Hide pure GET reads unless http filter is active
+  if (_logsFilter !== 'http') evts = evts.filter(e => !(e.type === 'http' && e.action === 'get'));
+  if (logsSearchQuery) {
+    const q = logsSearchQuery.toLowerCase();
+    evts = evts.filter(e =>
+      (e.detail||'').toLowerCase().includes(q) ||
+      (e.target||'').toLowerCase().includes(q) ||
+      (e.session||'').toLowerCase().includes(q) ||
+      e.action.toLowerCase().includes(q) ||
+      e.type.toLowerCase().includes(q)
+    );
+  }
+  if (!evts.length) {
+    el.innerHTML = '<div style="padding:48px 16px;text-align:center;color:var(--dim);font-size:0.85rem;">' +
+      (_logsFilter || logsSearchQuery ? 'No matching events' : 'No events yet \u2014 activity will appear as you use amux') + '</div>';
+    return;
+  }
+  // Group by calendar day (most recent first, evts are already newest-first)
+  const groups = new Map();
+  for (const e of evts) {
+    const day = new Date(e.ts*1000).toLocaleDateString([], {weekday:'short',month:'short',day:'numeric'});
+    if (!groups.has(day)) groups.set(day, []);
+    groups.get(day).push(e);
+  }
+  let html = '';
+  for (const [day, dayEvts] of groups) {
+    html += '<div class="logs-day-divider">' + escHtml(day) + '</div>';
+    for (const evt of dayEvts) {
+      const tc = _LOG_TYPE_CFG[evt.type] || {icon:'&#x2022;', color:'var(--dim)', label:evt.type};
+      const isErr = evt.status >= 400;
+      const ac = isErr ? 'var(--red)' : (_LOG_ACTION_COLOR[evt.action] || tc.color);
+      const title = _evtTitle(evt);
+      const meta = [];
+      if (evt.session) meta.push('<span style="color:var(--accent)">' + escHtml(evt.session) + '</span>');
+      if (evt.ip && evt.ip !== '127.0.0.1' && evt.ip !== '::1') meta.push(escHtml(evt.ip));
+      if (isErr) meta.push('<span style="color:var(--red)">HTTP ' + evt.status + '</span>');
+      html += '<div class="log-evt">' +
+        '<div class="log-evt-icon">' + tc.icon + '</div>' +
+        '<div class="log-evt-body">' +
+          '<div class="log-evt-title">' + escHtml(title) + '</div>' +
+          '<div class="log-evt-meta">' +
+            '<span class="log-evt-badge" style="background:' + ac + '1a;color:' + ac + ';border:1px solid ' + ac + '55">' + escHtml(evt.action) + '</span>' +
+            meta.join('') +
+          '</div>' +
+        '</div>' +
+        '<div class="log-evt-ts" title="' + escHtml(new Date(evt.ts*1000).toLocaleString()) + '">' + _relTime(evt.ts) + '</div>' +
+      '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function renderStats() {
+  const el = document.getElementById('logs-stats-body');
+  if (!el) return;
+  if (!_logsEvents.length) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;">No event data yet.</div>';
+    return;
+  }
+  const now = Date.now()/1000;
+  const h24 = _logsEvents.filter(e => now - e.ts < 86400);
+  const typeCounts = {}, sessionActivity = {};
+  let errCount = 0, boardCreates = 0, sessionStarts = 0, msgSent = 0;
+  for (const e of h24) {
+    typeCounts[e.type] = (typeCounts[e.type]||0) + 1;
+    if (e.session) sessionActivity[e.session] = (sessionActivity[e.session]||0) + 1;
+    if (e.status >= 400) errCount++;
+    if (e.type === 'board'   && e.action === 'created')      boardCreates++;
+    if (e.type === 'session' && e.action === 'started')      sessionStarts++;
+    if (e.type === 'session' && e.action === 'message-sent') msgSent++;
+  }
+  const cards = [
+    {label:'Events (24h)',    value:h24.length,                icon:'&#x26A1;'},
+    {label:'Total tracked',   value:_logsEvents.length,        icon:'&#x1F4CA;'},
+    {label:'Errors (24h)',    value:errCount,                  icon:'&#x274C;', hi: errCount>0},
+    {label:'Board created',   value:boardCreates,              icon:'&#x1F4CB;'},
+    {label:'Sessions started',value:sessionStarts,             icon:'&#x25B6;'},
+    {label:'Messages sent',   value:msgSent,                   icon:'&#x1F4AC;'},
+  ];
+  let html = '<div class="stats-grid">';
+  for (const c of cards) {
+    const color = c.hi ? 'var(--red)' : 'var(--text)';
+    html += '<div class="stat-card"><div class="stat-card-label">' + c.icon + ' ' + escHtml(c.label) + '</div>' +
+      '<div class="stat-card-value" style="color:' + color + '">' + c.value + '</div></div>';
+  }
+  html += '</div>';
+  const topSessions = Object.entries(sessionActivity).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  if (topSessions.length) {
+    html += '<div class="stat-card" style="margin-top:0;">';
+    html += '<div style="font-size:0.73rem;font-weight:700;color:var(--text);margin-bottom:10px;">Most Active Sessions (24h)</div>';
+    const maxVal = topSessions[0][1];
+    for (const [s, cnt] of topSessions) {
+      const pct = Math.round((cnt/maxVal)*100);
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">' +
+        '<span style="font-size:0.78rem;color:var(--accent);min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(s) + '</span>' +
+        '<div style="flex:1;background:var(--bg);border-radius:3px;height:5px;overflow:hidden;">' +
+          '<div style="height:100%;width:' + pct + '%;background:var(--accent);border-radius:3px;transition:width 0.3s;"></div>' +
+        '</div>' +
+        '<span style="font-size:0.71rem;color:var(--dim);min-width:28px;text-align:right;">' + cnt + '</span>' +
+      '</div>';
+    }
+    html += '</div>';
+  }
+  // Recent action breakdown
+  const actionCounts = {};
+  for (const e of h24) {
+    if (e.type !== 'http') {
+      const k = e.type + '.' + e.action;
+      actionCounts[k] = (actionCounts[k]||0) + 1;
+    }
+  }
+  const topActions = Object.entries(actionCounts).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  if (topActions.length) {
+    html += '<div class="stat-card">';
+    html += '<div style="font-size:0.73rem;font-weight:700;color:var(--text);margin-bottom:10px;">Top Actions (24h)</div>';
+    for (const [k, cnt] of topActions) {
+      const [type, action] = k.split('.');
+      const tc = _LOG_TYPE_CFG[type] || {icon:'&#x2022;', color:'var(--dim)'};
+      const ac = _LOG_ACTION_COLOR[action] || tc.color;
+      html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">' +
+        '<span>' + tc.icon + '</span>' +
+        '<span class="log-evt-badge" style="background:' + ac + '1a;color:' + ac + ';border:1px solid ' + ac + '55">' + escHtml(action) + '</span>' +
+        '<span style="font-size:0.71rem;color:var(--dim);">' + escHtml(type) + '</span>' +
+        '<span style="font-size:0.78rem;color:var(--text);margin-left:auto;">' + cnt + '</span>' +
+      '</div>';
+    }
+    html += '</div>';
+  }
+  el.innerHTML = html;
+}
+
+function logsSetTab(tab) {
+  _logsSubtab = tab;
+  ['activity','raw','stats'].forEach(t => {
+    document.getElementById('lst-' + t)?.classList.toggle('active', t === tab);
+    const p = document.getElementById('logs-panel-' + t);
+    if (p) p.style.display = t === tab ? 'flex' : 'none';
+  });
+  const fb = document.getElementById('logs-filter-bar');
+  if (fb) fb.style.display = tab === 'activity' ? 'flex' : 'none';
+  const ls = document.getElementById('logs-search');
+  if (ls) ls.style.display = tab === 'activity' ? '' : 'none';
+  if (tab === 'raw') fetchRawLogs();
+  else if (tab === 'stats') { fetchLogs(); }
+  else renderActivity();
+}
+
+function logsSetFilter(btn, filter) {
+  _logsFilter = filter;
+  document.querySelectorAll('.lf-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  fetchLogs();
+}
+
+function _startLogsTimer() {
+  if (_logsTimer) return;
+  _logsTimer = setInterval(() => {
+    if (activeView !== 'logs') return;
+    if (_logsSubtab === 'raw') fetchRawLogs();
+    else fetchLogs();
+  }, 5000);
+}
+function _stopLogsTimer() {
+  if (_logsTimer) { clearInterval(_logsTimer); _logsTimer = null; }
+}
+// ── end Logs tab ──────────────────────────────────────────────────────────────
 
 async function fetchSchedules() {
   try {
@@ -11317,6 +11764,18 @@ class CCHandler(BaseHTTPRequestHandler):
                 dt_ms = (time.monotonic() - t0) * 1000
                 ip = self.client_address[0]
                 slog(f"[{ip}] {method} {path} {self._resp_status} {dt_ms:.0f}ms")
+                # Emit structured event — handlers may enrich via _req_tl.event
+                etype, action, target, session = _classify_request(method, path)
+                tl = getattr(_req_tl, "event", None)
+                detail = ""
+                if tl:
+                    etype    = tl.get("type",    etype)
+                    action   = tl.get("action",  action)
+                    target   = tl.get("target",  target)
+                    session  = tl.get("session", session)
+                    detail   = tl.get("detail",  "")
+                    _req_tl.event = None
+                _emit_event(etype, action, target, session, detail, self._resp_status, ip)
 
     def _route_inner(self, method: str, path: str, qs: dict):
 
@@ -11787,6 +12246,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 _sse_cache["board"]["time"] = 0  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
+                _req_tl.event = {"type": "board", "action": "created", "target": item_id,
+                                 "session": session, "detail": f"{item_id}: {title}"}
                 return self._json(item, 201)
 
             # POST /api/board/clear-done — soft-delete all done issues
@@ -12676,6 +13137,33 @@ class CCHandler(BaseHTTPRequestHandler):
 
                 return self._json({"error": "nothing to update"}, 400)
             return self._json({"error": "not found"}, 404)
+
+        # GET /api/logs — structured event feed + raw server log
+        if path == "/api/logs" and method == "GET":
+            log_type  = qs.get("type",   ["events"])[0]   # events | raw | both
+            since     = float(qs.get("since",  ["0"])[0])
+            limit_n   = min(int(qs.get("limit", ["500"])[0]), 2000)
+            filt      = qs.get("filter", [""])[0]          # event type filter
+            result: dict = {}
+            if log_type in ("events", "both"):
+                with _event_log_lock:
+                    evts = list(_event_log)
+                if since:
+                    evts = [e for e in evts if e["ts"] > since]
+                if filt:
+                    evts = [e for e in evts if e["type"] == filt]
+                result["events"] = list(reversed(evts[-limit_n:]))
+            if log_type in ("raw", "both"):
+                lines_n = int(qs.get("lines", ["300"])[0])
+                try:
+                    with open(SERVER_LOG, "r", errors="replace") as _f:
+                        all_lines = _f.readlines()
+                    result["raw"] = "".join(all_lines[-lines_n:])
+                    result["raw_total_lines"] = len(all_lines)
+                except Exception:
+                    result["raw"] = ""
+                    result["raw_total_lines"] = 0
+            return self._json(result)
 
         return self._json({"error": "method not allowed"}, 405)
 
