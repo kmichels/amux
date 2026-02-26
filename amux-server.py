@@ -7009,7 +7009,15 @@ async function toggleMic() {
     _micActive = false;
     btn.classList.remove('mic-active');
     btn.textContent = '\u{1F3A4}';
-    showToast('Microphone access denied');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showToast('Mic unavailable — requires HTTPS or localhost');
+    } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+      showToast('Microphone blocked — allow access in browser Site Settings');
+    } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
+      showToast('No microphone found');
+    } else {
+      showToast('Mic error: ' + (e.message || e.name || 'unknown'));
+    }
   }
 }
 
