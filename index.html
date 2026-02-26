@@ -37,7 +37,7 @@
     }
 
     @media (prefers-color-scheme: light) {
-      :root {
+      :root:not([data-theme="dark"]) {
         --bg: #fafafa;
         --fg: #111;
         --muted: #666;
@@ -49,6 +49,39 @@
         --btn-hover: #e5e5e5;
       }
     }
+
+    [data-theme="light"] {
+      --bg: #fafafa;
+      --fg: #111;
+      --muted: #666;
+      --border: #e5e5e5;
+      --code-bg: #f4f4f4;
+      --code-border: #e0e0e0;
+      --accent: #16a34a;
+      --btn-bg: #f0f0f0;
+      --btn-hover: #e5e5e5;
+    }
+
+    #theme-toggle {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 100;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--btn-bg);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      line-height: 1;
+    }
+    #theme-toggle:hover { background: var(--btn-hover); color: var(--fg); }
 
     html, body {
       background: var(--bg);
@@ -365,6 +398,7 @@
   </style>
 </head>
 <body>
+<button id="theme-toggle" aria-label="Toggle light/dark mode" title="Toggle light/dark mode"></button>
 <main>
 
   <div class="wordmark">
@@ -627,6 +661,23 @@
   });
   function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
   document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
+
+  // Theme toggle
+  var root = document.documentElement;
+  var toggle = document.getElementById('theme-toggle');
+  function isDark() { return root.getAttribute('data-theme') === 'dark' || (!root.getAttribute('data-theme') && !window.matchMedia('(prefers-color-scheme: light)').matches); }
+  function applyTheme(dark) {
+    root.setAttribute('data-theme', dark ? 'dark' : 'light');
+    toggle.textContent = dark ? '☀' : '🌙';
+    toggle.title = dark ? 'Switch to light mode' : 'Switch to dark mode';
+  }
+  var saved = localStorage.getItem('amux_theme');
+  applyTheme(saved ? saved === 'dark' : !window.matchMedia('(prefers-color-scheme: light)').matches);
+  toggle.addEventListener('click', function() {
+    var dark = !isDark();
+    applyTheme(dark);
+    localStorage.setItem('amux_theme', dark ? 'dark' : 'light');
+  });
 </script>
 </body>
 </html>
