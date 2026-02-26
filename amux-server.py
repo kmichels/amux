@@ -3427,6 +3427,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
     display: flex; align-items: center; flex-shrink: 0; }
   .peek-attach-btn:hover { color: var(--text); border-color: var(--accent); }
+  .peek-attach-btn.mic-active { color: var(--red); border-color: var(--red); animation: mic-pulse 1s ease-in-out infinite; }
+  @keyframes mic-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   /* Drag-over overlay */
   #peek-overlay.drag-over { outline: 2px dashed var(--accent); outline-offset: -3px; }
   #peek-overlay.drag-over .peek-drag-hint {
@@ -4718,6 +4720,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input type="file" id="peek-file-input" multiple accept="image/*,.pdf,.txt,.md,.csv,.json,.log"
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
+        <button id="peek-mic-btn" class="peek-attach-btn" title="Dictate" onclick="toggleMic()" style="display:none;">&#127908;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
@@ -6935,6 +6938,79 @@ async function uploadAndAttach(file) {
 function handlePeekFileInput(e) {
   for (const f of e.target.files) uploadAndAttach(f);
   e.target.value = '';
+}
+
+// ── Microphone / transcription ──
+let _micRecorder = null;
+let _micChunks = [];
+let _micActive = false;
+
+async function _checkTranscription() {
+  try {
+    const r = await fetch(API + '/api/transcribe');
+    const d = await r.json();
+    if (d.available) document.getElementById('peek-mic-btn').style.display = '';
+  } catch(e) {}
+}
+
+function _bufToB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk)
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(bin);
+}
+
+async function toggleMic() {
+  const btn = document.getElementById('peek-mic-btn');
+  if (_micActive) {
+    _micRecorder && _micRecorder.stop();
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _micChunks = [];
+    _micActive = true;
+    btn.textContent = '\u23F9';
+    btn.classList.add('mic-active');
+    _micRecorder = new MediaRecorder(stream);
+    _micRecorder.ondataavailable = e => { if (e.data.size > 0) _micChunks.push(e.data); };
+    _micRecorder.onstop = async () => {
+      _micActive = false;
+      btn.classList.remove('mic-active');
+      stream.getTracks().forEach(t => t.stop());
+      btn.textContent = '\u23F3';
+      try {
+        const blob = new Blob(_micChunks, { type: _micRecorder.mimeType || 'audio/webm' });
+        const b64 = _bufToB64(await blob.arrayBuffer());
+        const r = await fetch(API + '/api/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data: b64, mime: blob.type }),
+        });
+        const d = await r.json();
+        if (d.text) {
+          const inp = document.getElementById('peek-cmd-input');
+          inp.value = (inp.value ? inp.value + ' ' : '') + d.text;
+          autoGrow(inp);
+          inp.focus();
+        } else {
+          showToast('Transcription failed: ' + (d.error || 'unknown'));
+        }
+      } catch(e) {
+        showToast('Transcription error: ' + e.message);
+      } finally {
+        btn.textContent = '\u{1F3A4}';
+      }
+    };
+    _micRecorder.start();
+  } catch(e) {
+    _micActive = false;
+    btn.classList.remove('mic-active');
+    btn.textContent = '\u{1F3A4}';
+    showToast('Microphone access denied');
+  }
 }
 
 let _slashAcSuppressNext = false;
@@ -11074,6 +11150,7 @@ function enablePollingFallback() {
 // Start SSE (falls back to polling on failure)
 connectSSE();
 _updateNotifBtn();
+_checkTranscription();
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -12751,6 +12828,45 @@ class CCHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             return self._json({"path": str(save_path), "name": filename, "url": f"/api/uploads/{save_name}"})
+
+        # ── Transcription (OpenAI Whisper) ──
+        if path == "/api/transcribe":
+            key = os.environ.get("OPENAI_API_KEY", "")
+            if method == "GET":
+                return self._json({"available": bool(key)})
+            if method == "POST":
+                if not key:
+                    return self._json({"error": "transcription not configured"}, 503)
+                body = self._read_body()
+                audio_b64 = body.get("data", "")
+                mime = body.get("mime", "audio/webm")
+                ext = "webm" if "webm" in mime else "wav" if "wav" in mime else "m4a" if "m4a" in mime or "mp4" in mime else "webm"
+                try:
+                    audio_data = base64.b64decode(audio_b64)
+                except Exception:
+                    return self._json({"error": "invalid base64"}, 400)
+                boundary = uuid.uuid4().hex
+                parts = [
+                    (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1').encode(),
+                    (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.{ext}"\r\nContent-Type: {mime}\r\n\r\n').encode() + audio_data,
+                    (f'--{boundary}--').encode(),
+                ]
+                multipart = b"\r\n".join(parts)
+                import urllib.request as _urq
+                req = _urq.Request(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    data=multipart,
+                    headers={
+                        "Authorization": f"Bearer {key}",
+                        "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    },
+                )
+                try:
+                    with _urq.urlopen(req, timeout=30) as r:
+                        result = json.loads(r.read())
+                    return self._json({"text": result.get("text", "")})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
 
         # ── Serve uploaded files ──
         if method == "GET" and path.startswith("/api/uploads/"):
