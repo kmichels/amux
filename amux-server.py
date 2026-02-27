@@ -5596,7 +5596,6 @@ function render() {
           <div class="card-menu" id="menu-${s.name}">
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();openPeek('${s.name}')"><span class="mi">&#x1F4BB;</span> Peek terminal</div>
           <div class="card-menu-item" onclick="event.stopPropagation();closeAllMenus();showSessionInfo('${s.name}')"><span class="mi">&#x2139;</span> Info</div>
-          ${s.running ? `<div class="card-menu-item danger" onclick="event.stopPropagation();doStop('${s.name}')"><span class="mi">&#x23F9;</span> Stop</div>` : ''}
           <div class="card-menu-item" onclick="event.stopPropagation();togglePin('${s.name}')"><span class="mi">${s.pinned?'&#x1F4CC;':'&#x1F4CC;'}</span> ${s.pinned ? 'Unpin' : 'Pin to top'}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
@@ -5649,9 +5648,6 @@ function render() {
         </div>` : ''}
         ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
-        <div class="panel-actions">
-          ${!s.running ? `<button class="btn" id="start-btn-${s.name}" onclick="this.textContent='Starting...';this.disabled=true;doStart('${s.name}')">Start</button>` : ''}
-        </div>
         ${s.running ? `
         <div class="chips">
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
@@ -8393,9 +8389,9 @@ async function submitCreate() {
         body: JSON.stringify({branch, create: true}),
       }).catch(() => {});
     }
+    // Always start the session immediately
+    await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
     if (prompt) {
-      // Start session then send prompt
-      await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
       setTimeout(async () => {
         await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
           method: 'POST', headers: {'Content-Type':'application/json'},
