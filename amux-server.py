@@ -6946,7 +6946,7 @@ let _micChunks = [];
 let _micActive = false;
 
 async function _checkTranscription() {
-  if (!window.isSecureContext) return;
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
   try {
     const r = await fetch(API + '/api/transcribe');
     const d = await r.json();
@@ -7012,9 +7012,14 @@ async function toggleMic() {
     btn.classList.remove('mic-active');
     btn.textContent = '\u{1F3A4}';
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      showToast('Mic unavailable — requires HTTPS or localhost');
+      const isPwa = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+      if (isPwa) {
+        showToast('Mic unavailable in PWA — open in Safari and try again, or update to iOS 16.4+');
+      } else {
+        showToast('Mic unavailable — requires HTTPS or localhost');
+      }
     } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-      showToast('Microphone blocked — System Settings → Privacy & Security → Microphone → allow Chrome');
+      showToast('Microphone blocked — System Settings → Privacy & Security → Microphone → allow Safari');
     } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
       showToast('No microphone found');
     } else {
