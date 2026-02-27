@@ -14297,12 +14297,25 @@ def main():
             from http.server import HTTPServer, BaseHTTPRequestHandler
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
-                    cert_path = TLS_DIR / "cert.pem"
-                    if self.path.rstrip("/") == "/api/cert" and cert_path.exists():
-                        body = cert_path.read_bytes()
+                    # Serve any .crt/.pem file in TLS_DIR by name, plus /api/cert legacy path
+                    import urllib.parse
+                    req = urllib.parse.unquote(self.path.split("?")[0]).lstrip("/")
+                    served = None
+                    if req == "api/cert":
+                        p = TLS_DIR / "cert.pem"
+                        if p.exists():
+                            served = (p, "application/x-pem-file", "amux.pem")
+                    elif req and (req.endswith(".crt") or req.endswith(".pem")):
+                        p = TLS_DIR / req
+                        if p.exists():
+                            fname = p.name
+                            served = (p, "application/x-x509-ca-cert", fname)
+                    if served:
+                        p, ctype, fname = served
+                        body = p.read_bytes()
                         self.send_response(200)
-                        self.send_header("Content-Type", "application/x-pem-file")
-                        self.send_header("Content-Disposition", 'attachment; filename="amux.pem"')
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
                         self.send_header("Content-Length", str(len(body)))
                         self.end_headers()
                         self.wfile.write(body)
