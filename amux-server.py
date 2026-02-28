@@ -2867,6 +2867,10 @@ If NOT an event email: {{"is_event": false}}"""
         text = msg.content[0].text.strip()
         if text.startswith("```"):
             text = "\n".join(text.split("\n")[1:]).rstrip("`").strip()
+        # Strip trailing content after JSON object in case model adds explanation
+        brace = text.rfind("}")
+        if brace != -1:
+            text = text[:brace + 1]
         result = json.loads(text)
         if result.get("is_event") and float(result.get("confidence", 0)) >= 0.65:
             return result
