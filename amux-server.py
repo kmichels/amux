@@ -1163,6 +1163,38 @@ CREATE TABLE IF NOT EXISTS logs (
 CREATE INDEX IF NOT EXISTS idx_logs_ts       ON logs(ts);
 CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
 CREATE INDEX IF NOT EXISTS idx_logs_session  ON logs(session) WHERE session IS NOT NULL;
+CREATE TABLE IF NOT EXISTS email_accounts (
+    id           TEXT PRIMARY KEY,
+    email        TEXT NOT NULL UNIQUE,
+    access_token TEXT,
+    refresh_token TEXT,
+    token_expiry INTEGER,
+    calendar_id  TEXT NOT NULL DEFAULT 'primary',
+    last_synced  INTEGER,
+    created      INTEGER NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS email_events (
+    id               TEXT PRIMARY KEY,
+    account_id       TEXT NOT NULL,
+    gmail_message_id TEXT NOT NULL,
+    gmail_thread_id  TEXT,
+    email_subject    TEXT,
+    email_from       TEXT,
+    email_date       TEXT,
+    event_title      TEXT,
+    event_start      TEXT,
+    event_end        TEXT,
+    event_location   TEXT,
+    event_description TEXT,
+    calendar_event_id TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    raw_extract      TEXT,
+    created          INTEGER NOT NULL,
+    UNIQUE(account_id, gmail_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_email_events_account ON email_events(account_id);
+CREATE INDEX IF NOT EXISTS idx_email_events_status  ON email_events(status);
 """
 
 
@@ -2695,6 +2727,300 @@ def get_lan_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+# ═══════════════════════════════════════════
+# EMAIL → GOOGLE CALENDAR SYNC
+# ═══════════════════════════════════════════
+
+_GOOGLE_CLIENT_ID     = os.environ.get("AMUX_GOOGLE_CLIENT_ID", "")
+_GOOGLE_CLIENT_SECRET = os.environ.get("AMUX_GOOGLE_CLIENT_SECRET", "")
+_GOOGLE_REDIRECT_URI  = os.environ.get("AMUX_GOOGLE_REDIRECT_URI",
+                                       "https://localhost:8822/api/email/callback")
+_GOOGLE_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+_EMAIL_SYNC_INTERVAL  = int(os.environ.get("AMUX_EMAIL_SYNC_INTERVAL", "900"))   # 15 min
+_EMAIL_LOOKBACK_DAYS  = int(os.environ.get("AMUX_EMAIL_LOOKBACK_DAYS",  "60"))
+_email_sync_lock      = threading.Lock()
+_email_oauth_states: dict = {}   # state → expiry ts (CSRF protection)
+
+
+def _google_refresh_token(account_id: str) -> None:
+    """Refresh OAuth access token using stored refresh_token."""
+    import urllib.request as _ur, urllib.parse as _up
+    db = get_db()
+    row = db.execute("SELECT refresh_token FROM email_accounts WHERE id=?", (account_id,)).fetchone()
+    if not row or not row["refresh_token"]:
+        raise RuntimeError("No refresh token — account must reconnect")
+    data = _up.urlencode({
+        "client_id": _GOOGLE_CLIENT_ID,
+        "client_secret": _GOOGLE_CLIENT_SECRET,
+        "refresh_token": row["refresh_token"],
+        "grant_type": "refresh_token",
+    }).encode()
+    req = _ur.Request("https://oauth2.googleapis.com/token", data=data,
+                      headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with _ur.urlopen(req, timeout=15) as r:
+        tokens = json.loads(r.read())
+    expiry = int(time.time()) + tokens.get("expires_in", 3600)
+    db.execute("UPDATE email_accounts SET access_token=?, token_expiry=? WHERE id=?",
+               (tokens["access_token"], expiry, account_id))
+    db.commit()
+
+
+def _google_api(account_id: str, method: str, url: str,
+                body: dict = None, params: dict = None) -> dict:
+    """Authenticated Google API call with automatic token refresh."""
+    import urllib.request as _ur, urllib.parse as _up, urllib.error as _ue
+    db = get_db()
+    acc = db.execute("SELECT * FROM email_accounts WHERE id=?", (account_id,)).fetchone()
+    if not acc:
+        raise ValueError(f"Unknown account {account_id}")
+    # Refresh proactively if token expires within 60s
+    if not acc["access_token"] or (acc["token_expiry"] and acc["token_expiry"] < time.time() + 60):
+        _google_refresh_token(account_id)
+        acc = db.execute("SELECT * FROM email_accounts WHERE id=?", (account_id,)).fetchone()
+    token = acc["access_token"]
+    full_url = url + ("?" + _up.urlencode(params) if params else "")
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    req = _ur.Request(full_url, data=data, headers=headers, method=method)
+    try:
+        with _ur.urlopen(req, timeout=30) as r:
+            resp_body = r.read()
+            return json.loads(resp_body) if resp_body else {}
+    except _ue.HTTPError as e:
+        if e.code == 401:
+            # Token rejected — try refresh once more
+            _google_refresh_token(account_id)
+            acc = db.execute("SELECT * FROM email_accounts WHERE id=?", (account_id,)).fetchone()
+            headers["Authorization"] = f"Bearer {acc['access_token']}"
+            req2 = _ur.Request(full_url, data=data, headers=headers, method=method)
+            with _ur.urlopen(req2, timeout=30) as r2:
+                rb = r2.read()
+                return json.loads(rb) if rb else {}
+        raise
+
+
+def _email_get_text(payload: dict) -> str:
+    """Recursively extract readable text from a Gmail message payload."""
+    import base64 as _b64, re as _re
+    mime = payload.get("mimeType", "")
+    body = payload.get("body", {})
+    parts = payload.get("parts", [])
+    if body.get("data"):
+        raw = _b64.urlsafe_b64decode(body["data"] + "==").decode("utf-8", errors="replace")
+        if mime == "text/plain":
+            return raw[:8000]
+        if mime == "text/html":
+            text = _re.sub(r'<style[^>]*>.*?</style>', ' ', raw, flags=_re.DOTALL | _re.IGNORECASE)
+            text = _re.sub(r'<script[^>]*>.*?</script>', ' ', text, flags=_re.DOTALL | _re.IGNORECASE)
+            text = _re.sub(r'<[^>]+>', ' ', text)
+            for ent, ch in [("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"),
+                            ("&#39;", "'"), ("&quot;", '"')]:
+                text = text.replace(ent, ch)
+            text = _re.sub(r'\s+', ' ', text)
+            return text.strip()[:8000]
+    plain, html = "", ""
+    for part in parts:
+        if part.get("mimeType") == "text/plain":
+            plain = _email_get_text(part)
+        elif part.get("mimeType") == "text/html":
+            html = _email_get_text(part)
+        elif part.get("mimeType", "").startswith("multipart/"):
+            r = _email_get_text(part)
+            if r:
+                return r
+    return plain or html
+
+
+def _ai_extract_event(subject: str, sender: str, date_str: str, body: str) -> dict | None:
+    """Use Claude Haiku to extract event details from email. Returns dict or None."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        prompt = f"""Analyze this email and determine if it is a confirmation or reminder about a real-world event the recipient will attend (concert, show, sports game, conference, workshop, class, appointment, etc).
+
+Email subject: {subject}
+From: {sender}
+Date received: {date_str}
+Body (first 3000 chars):
+{body[:3000]}
+
+Respond with JSON only (no markdown fences):
+If this IS an event the recipient will attend:
+{{"is_event": true, "title": "Event name", "start": "YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD", "end": "YYYY-MM-DDTHH:MM:SS or null", "location": "Venue name and/or address or null", "description": "Short summary with key info (ticket #, seat, etc)", "confidence": 0.0-1.0}}
+
+If NOT an event email: {{"is_event": false}}"""
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text.strip()
+        # Strip markdown fences if model adds them
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+            text = text.rstrip("`").strip()
+        result = json.loads(text)
+        if result.get("is_event") and float(result.get("confidence", 0)) >= 0.65:
+            return result
+        return None
+    except Exception as e:
+        slog(f"[email] AI extract error: {e}")
+        return None
+
+
+def _gcal_create_event(account_id: str, event: dict) -> str | None:
+    """Create a Google Calendar event. Returns GCal event ID or None."""
+    import urllib.parse as _up
+    try:
+        acc = get_db().execute(
+            "SELECT calendar_id FROM email_accounts WHERE id=?", (account_id,)
+        ).fetchone()
+        cal_id = acc["calendar_id"] if acc else "primary"
+
+        def _dt(s):
+            if not s:
+                return None
+            if "T" in str(s):
+                return {"dateTime": s, "timeZone": "America/Los_Angeles"}
+            return {"date": str(s)[:10]}
+
+        start_dt = _dt(event.get("start"))
+        if not start_dt:
+            return None
+        end_dt = _dt(event.get("end"))
+        if not end_dt:
+            # Default 2-hour event or same-day
+            if "dateTime" in start_dt:
+                end_dt = start_dt  # Google will keep it as-is
+            else:
+                end_dt = start_dt
+
+        body = {
+            "summary": event.get("title", "Event"),
+            "location": event.get("location") or "",
+            "description": event.get("description") or "",
+            "start": start_dt,
+            "end": end_dt,
+        }
+        url = f"https://www.googleapis.com/calendar/v3/calendars/{_up.quote(cal_id, safe='')}/events"
+        result = _google_api(account_id, "POST", url, body=body)
+        return result.get("id")
+    except Exception as e:
+        slog(f"[email] GCal create error: {e}")
+        return None
+
+
+def _email_sync_account(account_id: str) -> None:
+    """Poll Gmail for event emails, extract with AI, push to Google Calendar."""
+    from datetime import datetime, timedelta
+    import urllib.parse as _up
+    db = get_db()
+    after_dt = (datetime.now() - timedelta(days=_EMAIL_LOOKBACK_DAYS)).strftime("%Y/%m/%d")
+    query = (
+        f"after:{after_dt} ("
+        "subject:(ticket OR confirmation OR reservation OR booking OR receipt OR "
+        '"your order" OR invitation OR "you\'re going" OR "event reminder" OR "your tickets") '
+        "OR from:(ticketmaster.com OR eventbrite.com OR axs.com OR seetickets.com "
+        "OR stubhub.com OR dice.fm OR universe.com OR tixr.com OR etix.com "
+        "OR livenation.com OR songkick.com OR bandsintown.com)"
+        ")"
+    )
+    try:
+        result = _google_api(account_id, "GET",
+                              "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                              params={"q": query, "maxResults": "75"})
+        messages = result.get("messages", [])
+        slog(f"[email] account {account_id}: {len(messages)} candidate emails")
+        for msg_ref in messages:
+            msg_id = msg_ref["id"]
+            existing = db.execute(
+                "SELECT id, status FROM email_events WHERE account_id=? AND gmail_message_id=?",
+                (account_id, msg_id),
+            ).fetchone()
+            if existing and existing["status"] in ("synced", "dismissed", "not_event"):
+                continue
+            try:
+                msg = _google_api(
+                    account_id, "GET",
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                    params={"format": "full"},
+                )
+                hdrs = {h["name"].lower(): h["value"]
+                        for h in msg.get("payload", {}).get("headers", [])}
+                subject   = hdrs.get("subject", "(no subject)")
+                sender    = hdrs.get("from", "")
+                date_str  = hdrs.get("date", "")
+                thread_id = msg.get("threadId")
+                body_text = _email_get_text(msg.get("payload", {}))
+                if existing:
+                    continue   # pending record already exists, skip re-extraction
+                event_data = _ai_extract_event(subject, sender, date_str, body_text)
+                now = int(time.time())
+                ev_id = str(uuid.uuid4())
+                if event_data:
+                    db.execute(
+                        "INSERT OR IGNORE INTO email_events "
+                        "(id, account_id, gmail_message_id, gmail_thread_id, email_subject, email_from, "
+                        "email_date, event_title, event_start, event_end, event_location, "
+                        "event_description, status, raw_extract, created) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (ev_id, account_id, msg_id, thread_id, subject, sender, date_str,
+                         event_data.get("title"), event_data.get("start"), event_data.get("end"),
+                         event_data.get("location"), event_data.get("description"),
+                         "pending", json.dumps(event_data), now),
+                    )
+                    db.commit()
+                    slog(f"[email] detected event: {event_data.get('title')}")
+                    cal_ev_id = _gcal_create_event(account_id, event_data)
+                    if cal_ev_id:
+                        db.execute(
+                            "UPDATE email_events SET status='synced', calendar_event_id=? WHERE id=?",
+                            (cal_ev_id, ev_id),
+                        )
+                        db.commit()
+                        slog(f"[email] → calendar: {event_data.get('title')}")
+                else:
+                    db.execute(
+                        "INSERT OR IGNORE INTO email_events "
+                        "(id, account_id, gmail_message_id, gmail_thread_id, email_subject, email_from, "
+                        "email_date, status, created) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (ev_id, account_id, msg_id, thread_id, subject, sender, date_str, "not_event", now),
+                    )
+                    db.commit()
+            except Exception as e:
+                slog(f"[email] message {msg_id} error: {e}")
+        db.execute("UPDATE email_accounts SET last_synced=? WHERE id=?",
+                   (int(time.time()), account_id))
+        db.commit()
+    except Exception as e:
+        slog(f"[email] sync error account {account_id}: {e}")
+
+
+def _email_sync_loop() -> None:
+    """Background thread: sync all enabled Gmail accounts on schedule."""
+    time.sleep(20)  # let server fully start
+    while True:
+        try:
+            if _GOOGLE_CLIENT_ID and _GOOGLE_CLIENT_SECRET:
+                with _email_sync_lock:
+                    accounts = get_db().execute(
+                        "SELECT id FROM email_accounts WHERE enabled=1"
+                    ).fetchall()
+                for acc in accounts:
+                    try:
+                        _email_sync_account(acc["id"])
+                    except Exception as e:
+                        slog(f"[email] account {acc['id']} error: {e}")
+        except Exception as e:
+            slog(f"[email] sync loop error: {e}")
+        time.sleep(_EMAIL_SYNC_INTERVAL)
 
 
 # ═══════════════════════════════════════════
@@ -4410,6 +4736,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
+  <button id="tab-email" onclick="switchView('email')">Email</button>
 </div>
 <div id="session-view">
 <div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
@@ -4475,6 +4802,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="cal-body"></div>
 </div>
 
+<!-- Email events view -->
+<div id="email-view" style="display:none;">
+  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Email Events</span>
+    <div style="flex:1;"></div>
+    <button class="btn" id="email-sync-btn" onclick="_emailSync()" style="font-size:0.78rem;padding:4px 10px;">&#x21BB; Sync Now</button>
+    <a id="email-connect-btn" href="/api/email/connect" class="btn" style="font-size:0.78rem;padding:4px 10px;text-decoration:none;">+ Connect Gmail</a>
+  </div>
+  <div id="email-setup-notice" style="display:none;margin:8px 12px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.8rem;color:var(--dim);line-height:1.5;">
+    <strong style="color:var(--text);">Setup required</strong><br>
+    Add to <code>~/.amux/server.env</code>:<br>
+    <code style="color:var(--accent);">AMUX_GOOGLE_CLIENT_ID=...</code><br>
+    <code style="color:var(--accent);">AMUX_GOOGLE_CLIENT_SECRET=...</code><br>
+    <span style="margin-top:6px;display:block;">Create credentials at <strong>console.cloud.google.com</strong> → APIs &amp; Services → Credentials → OAuth 2.0 Client ID (Web application). Enable Gmail API + Google Calendar API. Add redirect URI: <code>https://localhost:8822/api/email/callback</code></span>
+  </div>
+  <div id="email-accounts-section" style="padding:0 12px 6px;">
+    <div id="email-accounts-list"></div>
+  </div>
+  <div style="padding:0 12px 4px;display:flex;align-items:center;gap:8px;">
+    <span style="font-size:0.78rem;font-weight:600;color:var(--dim);">Detected Events</span>
+    <div style="flex:1;"></div>
+    <select id="email-filter" onchange="_emailRender()" style="font-size:0.75rem;padding:3px 7px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+      <option value="">All</option>
+      <option value="synced">Synced</option>
+      <option value="pending">Pending</option>
+      <option value="dismissed">Dismissed</option>
+    </select>
+  </div>
+  <div id="email-events-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:8px;"></div>
+</div>
 <!-- Reports view -->
 <div id="reports-view" style="display:none;">
   <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;">
@@ -8506,43 +8863,56 @@ async function loadExplore(path) {
     const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_exploreShowHidden ? '&hidden=1' : ''));
     const data = await r.json();
     if (data.error) { body.innerHTML = `<div style="padding:16px;color:var(--dim)">${esc(data.error)}</div>`; return; }
-    body.innerHTML = '';
-    // Back row if not at root
-    if (data.parent && data.parent !== data.path) {
-      const back = document.createElement('div');
-      back.className = 'explore-row';
-      back.innerHTML = `<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>`;
-      back.onclick = () => loadExplore(data.parent);
-      body.appendChild(back);
-    }
-    if (!data.entries.length) {
-      body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
-      return;
-    }
-    const pins = _loadPins(_exploreSession);
-    const pinSet = new Set(pins);
-    const pinned = pins.map(p => data.entries.find(e => path.replace(/\/$/, '') + '/' + e.name === p)).filter(Boolean);
-    const rest = data.entries.filter(e => !pinSet.has(path.replace(/\/$/, '') + '/' + e.name));
-    for (const entry of [...pinned, ...rest]) {
-      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
-      const isPinned = pinSet.has(entryPath);
-      const row = document.createElement('div');
-      row.className = 'explore-row' + (isPinned ? ' explore-row-pinned' : '');
-      const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
-      const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
-      const pinIndicator = isPinned ? '<span class="explore-pin-dot" title="Pinned">&#x1F4CC;</span>' : '';
-      const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this)">⋯</button>`;
-      const mtime = entry.modified ? `<span class="explore-mtime">${timeAgo(entry.modified)}</span>` : '';
-      row.innerHTML = `<span class="explore-icon">${icon}</span>${pinIndicator}<span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
-      if (entry.type === 'dir') {
-        row.onclick = () => loadExplore(entryPath);
-      } else {
-        row.onclick = () => openFilePreview(entryPath);
-      }
-      body.appendChild(row);
-    }
+    _idb.setFile(path, { type: 'dir', data });
+    _renderExploreEntries(body, path, data, false);
   } catch(e) {
-    body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+    const cached = await _idb.getFile(path);
+    if (cached && cached.type === 'dir') {
+      _renderExploreEntries(body, path, cached.data, cached.ts);
+    } else {
+      body.innerHTML = '<div style="padding:16px;color:var(--dim)">Offline — no cached data for this directory.</div>';
+    }
+  }
+}
+function _renderExploreEntries(body, path, data, cacheTs) {
+  body.innerHTML = '';
+  if (cacheTs) {
+    const age = Math.round((Date.now() - cacheTs) / 60000);
+    const ageStr = age < 60 ? age + 'm ago' : Math.round(age/60) + 'h ago';
+    body.innerHTML = '<div style="padding:4px 12px;font-size:0.7rem;color:var(--dim);background:var(--card);border-bottom:1px solid var(--border);">&#x1F4F5; Offline cache &middot; ' + ageStr + '</div>';
+  }
+  if (data.parent && data.parent !== data.path) {
+    const back = document.createElement('div');
+    back.className = 'explore-row';
+    back.innerHTML = `<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>`;
+    back.onclick = () => loadExplore(data.parent);
+    body.appendChild(back);
+  }
+  if (!data.entries.length) {
+    body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+    return;
+  }
+  const pins = _loadPins(_exploreSession);
+  const pinSet = new Set(pins);
+  const pinned = pins.map(p => data.entries.find(e => path.replace(/\/$/, '') + '/' + e.name === p)).filter(Boolean);
+  const rest = data.entries.filter(e => !pinSet.has(path.replace(/\/$/, '') + '/' + e.name));
+  for (const entry of [...pinned, ...rest]) {
+    const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+    const isPinned = pinSet.has(entryPath);
+    const row = document.createElement('div');
+    row.className = 'explore-row' + (isPinned ? ' explore-row-pinned' : '');
+    const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
+    const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
+    const pinIndicator = isPinned ? '<span class="explore-pin-dot" title="Pinned">&#x1F4CC;</span>' : '';
+    const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this)">⋯</button>`;
+    const mtime = entry.modified ? `<span class="explore-mtime">${timeAgo(entry.modified)}</span>` : '';
+    row.innerHTML = `<span class="explore-icon">${icon}</span>${pinIndicator}<span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
+    if (entry.type === 'dir') {
+      row.onclick = () => loadExplore(entryPath);
+    } else {
+      row.onclick = () => openFilePreview(entryPath);
+    }
+    body.appendChild(row);
   }
 }
 
@@ -9529,6 +9899,7 @@ function switchView(view) {
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
+  document.getElementById('email-view').style.display = view === 'email' ? '' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
@@ -9537,9 +9908,11 @@ function switchView(view) {
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
+  document.getElementById('tab-email').classList.toggle('active', view === 'email');
   if (view === 'files') loadFiles(_filesPath);
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
+  if (view === 'email') _emailLoad();
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -9551,6 +9924,8 @@ function switchView(view) {
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
+  // Handle hash navigation (e.g. redirect from OAuth callback)
+  if (view === 'email' && location.hash === '#email') history.replaceState(null, '', '/');
 }
 
 // ── Logs tab ──────────────────────────────────────────────────────────────────
