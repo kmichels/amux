@@ -2778,13 +2778,16 @@ tell application "Mail"
         try
             repeat with mb in mailboxes of acct
                 if name of mb is "INBOX" then
-                    set processed to 0
-                    repeat with msg in (messages of mb)
-                        if processed >= {max_msgs} then exit repeat
+                    -- Use indexed access to avoid loading all 21k+ message refs
+                    try
+                        set recentMsgs to messages 1 through {max_msgs} of mb
+                    on error
+                        set recentMsgs to messages of mb
+                    end try
+                    repeat with msg in recentMsgs
                         try
                             if date received of msg < cutoff then exit repeat
                         end try
-                        set processed to processed + 1
                         try
                             set subj to subject of msg
                             set sndr to sender of msg
