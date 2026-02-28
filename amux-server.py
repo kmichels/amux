@@ -14542,6 +14542,74 @@ class CCHandler(BaseHTTPRequestHandler):
                     result["raw_total_lines"] = 0
             return self._json(result)
 
+        # ── /api/email/* — Mail.app + Calendar.app via AppleScript (no OAuth) ────
+        if path.startswith("/api/email"):
+
+            # GET /api/email/events
+            if method == "GET" and path == "/api/email/events":
+                status_f = qs.get("status", [""])[0]
+                if status_f:
+                    rows = get_db().execute(
+                        "SELECT * FROM email_events WHERE status=? "
+                        "ORDER BY event_start, created DESC LIMIT 200",
+                        (status_f,),
+                    ).fetchall()
+                else:
+                    rows = get_db().execute(
+                        "SELECT * FROM email_events WHERE status != 'not_event' "
+                        "ORDER BY event_start, created DESC LIMIT 200",
+                    ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            # POST /api/email/sync — trigger manual sync in background
+            if method == "POST" and path == "/api/email/sync":
+                threading.Thread(target=_email_sync, daemon=True).start()
+                return self._json({"ok": True})
+
+            # PATCH /api/email/events/<id> — dismiss or manually push to calendar
+            _m_ev = re.match(r"^/api/email/events/([a-f0-9-]+)$", path)
+            if _m_ev and method == "PATCH":
+                ev_id = _m_ev.group(1)
+                body  = self._body_json()
+                ev = get_db().execute(
+                    "SELECT * FROM email_events WHERE id=?", (ev_id,)
+                ).fetchone()
+                if not ev:
+                    return self._json({"error": "not found"}, 404)
+                if body.get("status") == "dismissed":
+                    get_db().execute(
+                        "UPDATE email_events SET status='dismissed' WHERE id=?", (ev_id,)
+                    )
+                    get_db().commit()
+                    return self._json({"ok": True})
+                if body.get("push"):
+                    event_data = {
+                        "title":       ev["event_title"],
+                        "start":       ev["event_start"],
+                        "end":         ev["event_end"],
+                        "location":    ev["event_location"],
+                        "description": ev["event_description"],
+                    }
+                    ok = _cal_create_event(event_data)
+                    if ok:
+                        get_db().execute(
+                            "UPDATE email_events SET status='synced', calendar_event_id='applescript' WHERE id=?",
+                            (ev_id,),
+                        )
+                        get_db().commit()
+                        return self._json({"ok": True})
+                    return self._json({"error": "Calendar.app event creation failed"}, 500)
+                return self._json({"error": "nothing to update"}, 400)
+
+            # DELETE /api/email/events/<id> — hard delete
+            if _m_ev and method == "DELETE":
+                ev_id = _m_ev.group(1)
+                get_db().execute("DELETE FROM email_events WHERE id=?", (ev_id,))
+                get_db().commit()
+                return self._json({"ok": True})
+
+            return self._json({"error": "not found"}, 404)
+
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
         if not m:
@@ -14894,74 +14962,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "message": "conversation reset — next start will be a fresh conversation"})
 
                 return self._json({"error": "nothing to update"}, 400)
-            return self._json({"error": "not found"}, 404)
-
-        # ── /api/email/* — Mail.app + Calendar.app via AppleScript (no OAuth) ────
-        if path.startswith("/api/email"):
-
-            # GET /api/email/events
-            if method == "GET" and path == "/api/email/events":
-                status_f = qs.get("status", [""])[0]
-                if status_f:
-                    rows = get_db().execute(
-                        "SELECT * FROM email_events WHERE status=? "
-                        "ORDER BY event_start, created DESC LIMIT 200",
-                        (status_f,),
-                    ).fetchall()
-                else:
-                    rows = get_db().execute(
-                        "SELECT * FROM email_events WHERE status != 'not_event' "
-                        "ORDER BY event_start, created DESC LIMIT 200",
-                    ).fetchall()
-                return self._json([dict(r) for r in rows])
-
-            # POST /api/email/sync — trigger manual sync in background
-            if method == "POST" and path == "/api/email/sync":
-                threading.Thread(target=_email_sync, daemon=True).start()
-                return self._json({"ok": True})
-
-            # PATCH /api/email/events/<id> — dismiss or manually push to calendar
-            m2 = re.match(r"^/api/email/events/([a-f0-9-]+)$", path)
-            if m2 and method == "PATCH":
-                ev_id = m2.group(1)
-                body  = self._body_json()
-                ev = get_db().execute(
-                    "SELECT * FROM email_events WHERE id=?", (ev_id,)
-                ).fetchone()
-                if not ev:
-                    return self._json({"error": "not found"}, 404)
-                if body.get("status") == "dismissed":
-                    get_db().execute(
-                        "UPDATE email_events SET status='dismissed' WHERE id=?", (ev_id,)
-                    )
-                    get_db().commit()
-                    return self._json({"ok": True})
-                if body.get("push"):
-                    event_data = {
-                        "title":       ev["event_title"],
-                        "start":       ev["event_start"],
-                        "end":         ev["event_end"],
-                        "location":    ev["event_location"],
-                        "description": ev["event_description"],
-                    }
-                    ok = _cal_create_event(event_data)
-                    if ok:
-                        get_db().execute(
-                            "UPDATE email_events SET status='synced', calendar_event_id='applescript' WHERE id=?",
-                            (ev_id,),
-                        )
-                        get_db().commit()
-                        return self._json({"ok": True})
-                    return self._json({"error": "Calendar.app event creation failed"}, 500)
-                return self._json({"error": "nothing to update"}, 400)
-
-            # DELETE /api/email/events/<id> — hard delete
-            if m2 and method == "DELETE":
-                ev_id = m2.group(1)
-                get_db().execute("DELETE FROM email_events WHERE id=?", (ev_id,))
-                get_db().commit()
-                return self._json({"ok": True})
-
             return self._json({"error": "not found"}, 404)
 
         return self._json({"error": "method not allowed"}, 405)
