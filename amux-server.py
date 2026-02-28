@@ -4154,11 +4154,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: none; padding: 10px 6px; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 14px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
+    border-right: 1px solid var(--border);
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
   }
+  .tab-bar button:last-child { border-right: none; }
   .tab-bar button.active { color: var(--accent); border-bottom-color: var(--accent); }
   .tab-bar button:active { opacity: 0.7; }
 
