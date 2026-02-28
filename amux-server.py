@@ -3153,9 +3153,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .cards.grid-mode { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
   }
   /* Sortable drag feedback */
-  .sortable-ghost { opacity: 0.25; background: var(--accent) !important; border-color: var(--accent) !important; }
-  .sortable-chosen { box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 10; }
-  .sortable-drag { opacity: 0; }
+  body.session-dragging, body.session-dragging * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing !important; }
+  .sortable-ghost { opacity: 0.35; background: rgba(88,166,255,0.07) !important; border: 2px dashed var(--accent) !important; border-radius: 10px; }
+  .sortable-chosen { opacity: 0.7; box-shadow: none; }
+  .sortable-drag { opacity: 0.96; box-shadow: 0 14px 36px rgba(0,0,0,0.45); transform: rotate(1deg) scale(1.02); border-radius: 10px; }
   .cards.grid-mode .card { cursor: grab; }
   .cards.grid-mode .card:active { cursor: grabbing; }
 
@@ -9549,24 +9550,25 @@ function initSortable() {
   if (!cards) return;
   _sortable = Sortable.create(cards, {
     handle: '.card-drag-handle',
-    animation: 150,
+    animation: 180,
     ghostClass: 'sortable-ghost',
     chosenClass: 'sortable-chosen',
     dragClass: 'sortable-drag',
+    delay: 120,
+    delayOnTouchOnly: true,
+    touchStartThreshold: 3,
+    swapThreshold: 0.6,
     onStart: function(evt) {
       _tileJustDragged = false;
-      console.log('[amux:drag] onStart', { session: evt.item?.dataset?.session, oldIndex: evt.oldIndex });
-    },
-    onMove: function(evt) {
-      console.log('[amux:drag] onMove', { dragged: evt.dragged?.dataset?.session, related: evt.related?.dataset?.session, willInsertAfter: evt.willInsertAfter });
+      document.body.classList.add('session-dragging');
     },
     onEnd: function(evt) {
+      document.body.classList.remove('session-dragging');
       _tileJustDragged = evt.oldIndex !== evt.newIndex;
       const allCards = cards.querySelectorAll('.card[data-session]');
       cardOrder = Array.from(allCards).map(c => c.dataset.session);
       localStorage.setItem('amux_card_order', JSON.stringify(cardOrder));
       _updateResetBtn();
-      console.log('[amux:drag] onEnd', { session: evt.item?.dataset?.session, oldIndex: evt.oldIndex, newIndex: evt.newIndex, moved: _tileJustDragged, cardOrder });
     }
   });
 }
