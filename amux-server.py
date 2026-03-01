@@ -940,6 +940,7 @@ def _snapshot_all_sessions():
                 pct = int(ctx_match.group(1))
                 if pct < 20 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
+                    actions["post_compact_continue"] = True  # send continuation when compact finishes
                     send_text(name, "/compact")
                     _push_alert("auto_compact", name,
                                 f"Auto-compacted '{name}' — context was at {pct}%")
@@ -967,6 +968,22 @@ def _snapshot_all_sessions():
 
             # ── 3. Auto-continue: unblock waiting sessions ───────────────────
             status = _detect_claude_status(clean)
+
+            # ── 3a. Post-compact continuation ──────────────────────────────────
+            # After we trigger auto-compact, the session goes idle at the ❯ prompt.
+            # status == 'idle' doesn't trigger normal auto-continue, so we handle
+            # it explicitly: wait ≥30s for compact to finish, then send a continue msg.
+            if actions.get("post_compact_continue") and status in ("idle", "waiting"):
+                elapsed_since_compact = now - actions.get("last_compact", 0)
+                if elapsed_since_compact > 30 and now - actions.get("last_auto_continue", 0) > 60:
+                    cfg_ac = parse_env_file(f)
+                    cont_msg = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
+                    send_text(name, cont_msg)
+                    actions["last_auto_continue"] = now
+                    actions.pop("post_compact_continue", None)
+                    _push_alert("auto_continue", name,
+                                f"Post-compact auto-continue sent to '{name}'")
+
             if status == "waiting":
                 if "ac_waiting_since" not in actions:
                     # First snapshot seeing this session waiting — remember it
