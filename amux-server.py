@@ -8597,7 +8597,12 @@ async function _rbLoadProfiles() {
       opt.dataset.hasState = p.has_state ? '1' : '';
       sel.appendChild(opt);
     }
-    _rbCurrentProfile = d.active || 'default';
+    // Preserve an already-selected profile; only fall back to server's active on initial load
+    const serverActive = d.active || 'default';
+    const validNames = (d.profiles || []).map(p => p.name);
+    if (!_rbCurrentProfile || !validNames.includes(_rbCurrentProfile)) {
+      _rbCurrentProfile = serverActive;
+    }
     sel.value = _rbCurrentProfile;
     document.getElementById('rb-del-profile').style.display = _rbCurrentProfile !== 'default' ? '' : 'none';
     _rbUpdateProfileState(d.profiles || []);
