@@ -11053,7 +11053,7 @@ function _renderBoardCard(item) {
 }
 
 async function _togglePin(id) {
-  const item = _boardItems.find(i => i.id === id);
+  const item = boardItems.find(i => i.id === id);
   if (!item) return;
   const newVal = item.pinned ? 0 : 1;
   await fetch(API + '/api/board/' + id, {
@@ -11210,6 +11210,7 @@ function renderBoard() {
     if (stCol.length === 0) {
       html += '<div class="board-empty">Nothing here</div>';
     }
+    stCol.sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
     stCol.forEach(item => { html += _renderBoardCard(item); });
     if (st === 'done' && stCol.length > 0) {
       html += '<button class="board-add-btn" style="color:var(--red);border-color:rgba(248,81,73,0.2);" onclick="clearDone()">Clear done</button>';
