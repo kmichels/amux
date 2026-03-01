@@ -184,6 +184,70 @@ _rb_profile: str = "default"  # current active profile name
 _rb_last_video: str | None = None  # path to last recorded video (mp4 or webm)
 _RB_PROFILES_DIR = CC_HOME / "playwright-auth" / "profiles"
 _RB_VIDEOS_DIR = CC_HOME / "browser-videos"
+_RB_RECORDINGS_DIR = CC_HOME / "recordings"
+
+
+def _ms_to_srt_ts(ms: int) -> str:
+    """Convert milliseconds to SRT timecode HH:MM:SS,mmm."""
+    h = ms // 3_600_000; ms %= 3_600_000
+    m = ms // 60_000;    ms %= 60_000
+    s = ms // 1_000;     ms %= 1_000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _write_srt(captions: list, srt_path: str) -> None:
+    """Write a list of {start, end, text} dicts as an SRT subtitle file."""
+    lines = []
+    for i, c in enumerate(captions, 1):
+        lines.append(f"{i}\n{_ms_to_srt_ts(c['start'])} --> {_ms_to_srt_ts(c['end'])}\n{c['text']}")
+    Path(srt_path).write_text("\n\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _rb_process_video(webm: str, captions: list | None = None) -> str:
+    """Convert WebM → MP4, burning in SRT captions if provided. Returns final path."""
+    global _rb_last_video
+    _RB_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+    mp4 = str(_RB_RECORDINGS_DIR / f"recording-{ts}.mp4")
+
+    ffmpeg_base = ["ffmpeg", "-y", "-i", webm,
+                   "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+                   "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+
+    if captions:
+        srt_path = str(_RB_RECORDINGS_DIR / f"recording-{ts}.srt")
+        _write_srt(captions, srt_path)
+        # Escape SRT path for ffmpeg subtitle filter (colons need backslash on macOS)
+        srt_esc = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+        sub_filter = (f"subtitles='{srt_esc}':force_style="
+                      "'FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+                      "Outline=2,Shadow=1,Alignment=2,MarginV=40'")
+        try:
+            r = subprocess.run(
+                ffmpeg_base + ["-vf", sub_filter, mp4],
+                capture_output=True, timeout=180,
+            )
+            if r.returncode == 0 and os.path.exists(mp4):
+                _rb_last_video = mp4
+                return mp4
+        except Exception:
+            pass
+        # Fallback: no subtitle burn-in
+        mp4 = str(_RB_RECORDINGS_DIR / f"recording-{ts}-nosubs.mp4")
+
+    try:
+        r = subprocess.run(
+            ffmpeg_base + [mp4],
+            capture_output=True, timeout=180,
+        )
+        if r.returncode == 0 and os.path.exists(mp4):
+            _rb_last_video = mp4
+            return mp4
+    except Exception:
+        pass
+
+    _rb_last_video = webm
+    return webm
 
 # ── Browser agent state ──
 _rb_agent_state: dict = {
@@ -310,20 +374,9 @@ def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
         stop_result = _rb_send({"action": "stop"}, timeout=30.0)
         _rb_last_video = None
         webm = stop_result.get("videoPath")
+        captions = stop_result.get("captions") or []
         if webm and os.path.exists(webm):
-            mp4 = webm.rsplit(".", 1)[0] + ".mp4"
-            try:
-                # mpdecimate drops duplicate/idle frames; setpts reassigns timestamps at 25fps
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", webm,
-                     "-vf", "mpdecimate,setpts=N/25/TB", "-r", "25",
-                     "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                     "-pix_fmt", "yuv420p", "-an", mp4],
-                    capture_output=True, timeout=120,
-                )
-                _rb_last_video = mp4 if os.path.exists(mp4) else webm
-            except Exception:
-                _rb_last_video = webm
+            _rb_process_video(webm, captions or None)
         video_ready = bool(_rb_last_video)
         _rb_agent_update(
             running=False, done=True, video_ready=video_ready,
@@ -334,8 +387,95 @@ _RB_AGENT_SCRIPT = r"""
 const { chromium } = require('PLAYWRIGHT_PATH');
 const { homedir } = require('os');
 const readline = require('readline');
+const path = require('path');
 
 let ctx = null, page = null;
+
+// ── Caption system ─────────────────────────────────────────────────────────
+// Captions are stored with ms-offset from recording start, returned on stop.
+let _captions = [];
+let _recordingStartMs = 0;
+function _addCaption(text, durationMs) {
+  if (!_recordingStartMs) return;
+  const startMs = Date.now() - _recordingStartMs;
+  _captions.push({ start: startMs, end: startMs + (durationMs || 3500), text });
+}
+
+// ── Cursor + click-ripple injection script ─────────────────────────────────
+// Injected via ctx.addInitScript() — runs on every page in the context.
+// Both elements are DOM nodes so they appear in Playwright's recordVideo output.
+const _CURSOR_RIPPLE_SCRIPT = `
+(function() {
+  'use strict';
+  var CURSOR_ID = '__amux_cursor__';
+  function _attachCursor() {
+    if (document.getElementById(CURSOR_ID)) return;
+    var el = document.createElement('div');
+    el.id = CURSOR_ID;
+    el.style.cssText = [
+      'position:fixed','pointer-events:none','z-index:2147483647',
+      'width:20px','height:20px','border-radius:50%',
+      'border:2.5px solid rgba(255,80,0,0.92)',
+      'background:rgba(255,80,0,0.18)',
+      'transform:translate(-50%,-50%)',
+      'transition:left 0.06s linear,top 0.06s linear',
+      'box-shadow:0 0 0 3px rgba(255,80,0,0.22)',
+      'left:-100px','top:-100px',
+    ].join(';');
+    document.body.appendChild(el);
+    return el;
+  }
+  var _cursorEl = null;
+  document.addEventListener('mousemove', function(e) {
+    if (!_cursorEl) _cursorEl = _attachCursor();
+    if (_cursorEl) { _cursorEl.style.left = e.clientX+'px'; _cursorEl.style.top = e.clientY+'px'; }
+  }, {capture:true, passive:true});
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function() { _cursorEl = _attachCursor(); });
+  } else { _cursorEl = _attachCursor(); }
+
+  var _styleEl = document.createElement('style');
+  _styleEl.textContent = '@keyframes __amux_ripple{0%{transform:translate(-50%,-50%) scale(0.2);opacity:1}100%{transform:translate(-50%,-50%) scale(2.8);opacity:0}}';
+  (document.head || document.documentElement).appendChild(_styleEl);
+  document.addEventListener('click', function(e) {
+    var r = document.createElement('div');
+    r.style.cssText = [
+      'position:fixed','pointer-events:none','z-index:2147483646',
+      'width:44px','height:44px','border-radius:50%',
+      'background:rgba(255,140,0,0.50)',
+      'border:3px solid rgba(255,140,0,0.88)',
+      'left:'+e.clientX+'px','top:'+e.clientY+'px',
+      'animation:__amux_ripple 0.65s ease-out forwards',
+    ].join(';');
+    document.body.appendChild(r);
+    setTimeout(function(){r.remove();}, 750);
+  }, {capture:true, passive:true});
+})();
+`;
+
+// ── Ghost cursor (smooth Bezier mouse movement) ────────────────────────────
+let _ghostCursor = null;
+try {
+  const gcPath = path.resolve(__dirname, 'node_modules/ghost-cursor-playwright');
+  const { createCursor } = require(gcPath);
+  _ghostCursor = createCursor;
+} catch(e) { /* not installed — fall back to linear interpolation */ }
+
+async function _smoothMove(targetPage, x, y) {
+  if (_ghostCursor && targetPage) {
+    try {
+      const cur = await _ghostCursor(targetPage);
+      await cur.actions.move({ x, y });
+      return;
+    } catch(e) { /* fallback */ }
+  }
+  // Linear interpolation fallback
+  const steps = 18;
+  for (let i = 1; i <= steps; i++) {
+    await targetPage.mouse.move(640 + (x - 640) * (i / steps), 400 + (y - 400) * (i / steps));
+    await targetPage.waitForTimeout(16);
+  }
+}
 
 function attachPageListeners(p) {
   p.on('close', () => {
@@ -384,6 +524,12 @@ rl.on('line', async (line) => {
           ctxOpts.recordVideo = { dir: VIDEOS_DIR, size: { width: 1280, height: 800 } };
         }
         ctx = await chromium.launchPersistentContext(profilePath, ctxOpts);
+        // Inject visible cursor + click-ripple into every page
+        if (record) {
+          await ctx.addInitScript(_CURSOR_RIPPLE_SCRIPT);
+          _captions = [];
+          _recordingStartMs = Date.now();
+        }
         page = ctx.pages()[0] || await ctx.newPage();
         attachPageListeners(page);
         // Auto-switch to new tabs when they open
@@ -444,6 +590,18 @@ rl.on('line', async (line) => {
         await page.mouse.wheel(0, cmd.dy || 300);
         await page.waitForTimeout(400);
         respond({ ok: true });
+        break;
+      }
+      case 'smooth_move': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await _smoothMove(page, cmd.x, cmd.y);
+        respond({ ok: true });
+        break;
+      }
+      case 'caption': {
+        // Add a timed caption to the recording (stored with ms offset from start)
+        _addCaption(cmd.text, cmd.duration_ms);
+        respond({ ok: true, count: _captions.length });
         break;
       }
       case 'back': {
@@ -522,6 +680,7 @@ rl.on('line', async (line) => {
       }
       case 'stop': {
         let videoPath = null;
+        const capturesCopy = [..._captions];
         if (ctx) {
           try {
             const vid = page && page.video ? page.video() : null;
@@ -530,7 +689,8 @@ rl.on('line', async (line) => {
           } catch(e) {}
           ctx = null; page = null;
         }
-        respond({ ok: true, videoPath });
+        _captions = []; _recordingStartMs = 0;
+        respond({ ok: true, videoPath, captions: capturesCopy });
         process.exit(0);
         break;
       }
@@ -13890,19 +14050,9 @@ class CCHandler(BaseHTTPRequestHandler):
             result = _rb_send({"action": "stop"})
             _rb_last_video = None
             webm = result.get("videoPath")
+            captions = result.get("captions") or []
             if webm and os.path.exists(webm):
-                mp4 = webm.rsplit(".", 1)[0] + ".mp4"
-                try:
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", webm,
-                         "-vf", "mpdecimate,setpts=N/25/TB", "-r", "25",
-                         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-                         "-pix_fmt", "yuv420p", "-an", mp4],
-                        capture_output=True, timeout=120
-                    )
-                    _rb_last_video = mp4 if os.path.exists(mp4) else webm
-                except Exception:
-                    _rb_last_video = webm
+                _rb_process_video(webm, captions or None)
             return self._json({"ok": True, "videoReady": bool(_rb_last_video)})
 
         # POST /api/browser/agent — start AI agent task

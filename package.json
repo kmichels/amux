@@ -1,7 +1,10 @@
 {
   "private": true,
   "devDependencies": {
-    "playwright": "^1.58.0",
-    "@playwright/mcp": "^0.0.28"
+    "@playwright/mcp": "^0.0.28",
+    "playwright": "^1.58.0"
+  },
+  "dependencies": {
+    "ghost-cursor-playwright": "^2.1.0"
   }
 }
