@@ -6691,6 +6691,9 @@ function render() {
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
+      ${!s.running ? `<div style="padding:6px 0 2px;" onclick="event.stopPropagation()">
+        <button class="btn primary" style="width:100%;" onclick="doStart('${s.name}')">&#x25B6; Start</button>
+      </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
         ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
         ${isExp && s.running ? `<div class="card-timing">
@@ -6699,10 +6702,6 @@ function render() {
         </div>` : ''}
         ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
-        ${!s.running ? `
-        <div style="padding:4px 0 2px;">
-          <button class="btn primary" style="width:100%;" onclick="event.stopPropagation();doStart('${s.name}')">&#x25B6; Start</button>
-        </div>` : ''}
         ${s.running ? `
         <div class="chips">
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
