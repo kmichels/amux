@@ -48,6 +48,7 @@ CC_LOGS = CC_HOME / "logs"
 CC_MEMORY = CC_HOME / "memory"
 CC_BOARD_DIR = CC_HOME / "board"
 CC_UPLOADS = CC_HOME / "uploads"
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -3663,6 +3664,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .field-label { display: block; font-size: 0.72rem; color: var(--dim); font-weight: 600;
     text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
   .field-optional { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 0.68rem; }
+  /* Template accordion */
+  .tmpl-accordion { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; max-height: 260px; overflow-y: auto; }
+  .tmpl-item { border-bottom: 1px solid var(--border); }
+  .tmpl-item:last-child { border-bottom: none; }
+  .tmpl-item-hdr { display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; user-select: none; -webkit-tap-highlight-color: transparent; }
+  .tmpl-item-hdr:hover { background: var(--hover); }
+  .tmpl-item-icon { font-size: 1rem; flex-shrink: 0; }
+  .tmpl-item-label { font-size: 0.85rem; font-weight: 600; flex: 1; }
+  .tmpl-item-chev { color: var(--dim); font-size: 0.7rem; transition: transform 0.15s; }
+  .tmpl-item.open .tmpl-item-chev { transform: rotate(90deg); }
+  .tmpl-item-body { display: none; padding: 0 12px 10px 36px; }
+  .tmpl-item.open .tmpl-item-body { display: block; }
+  .tmpl-item-desc { font-size: 0.8rem; color: var(--dim); margin-bottom: 8px; line-height: 1.45; }
+  .tmpl-item-dirs { font-size: 0.72rem; color: var(--dim); margin-bottom: 8px; }
+  .tmpl-item-dirs code { background: var(--card); border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px; font-size: 0.7rem; }
+  .tmpl-selected-chip { display: inline-flex; align-items: center; gap: 6px; background: color-mix(in srgb, var(--accent) 15%, var(--bg)); border: 1px solid var(--accent); color: var(--accent); border-radius: 14px; padding: 4px 10px 4px 8px; font-size: 0.8rem; }
+  .tmpl-selected-chip button { background: none; border: none; cursor: pointer; color: var(--dim); font-size: 1rem; line-height: 1; padding: 0; margin: 0; }
   .dot {
     width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
   }
@@ -5128,6 +5146,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
+<div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
+  No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
+</div>
 
 <div class="header-row">
   <div style="display:flex;gap:8px;align-items:center;">
@@ -5154,9 +5175,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="settings-btn" id="settings-btn" onclick="event.stopPropagation();toggleSettings()">&#x2699;</button>
       <div class="settings-menu" id="settings-menu">
         <div class="settings-section">
-          <div class="settings-section-label">Device</div>
+          <div class="settings-section-label" id="settings-device-label">Device</div>
           <div id="settings-device-current" style="font-size:0.88rem;font-weight:600;margin-bottom:6px;"></div>
-          <div class="settings-row">
+          <div class="settings-row" id="settings-device-row">
             <input id="settings-device-name" type="text" autocomplete="off"
               onchange="saveDeviceName(this.value)">
           </div>
@@ -5693,6 +5714,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div id="ac-list" class="ac-list"></div>
       </div>
     </div>
+    <div class="field-group" id="create-template-field">
+      <label class="field-label">Template <span class="field-optional">(optional)</span></label>
+      <div id="tmpl-accordion" class="tmpl-accordion" style="display:none;"></div>
+      <div id="tmpl-selected-wrap" style="display:none;">
+        <span class="tmpl-selected-chip" id="tmpl-selected-chip">
+          <span id="tmpl-selected-text"></span>
+          <button onclick="_clearTemplate()" title="Remove template">&#x2715;</button>
+        </span>
+      </div>
+      <div id="tmpl-loading" style="font-size:0.75rem;color:var(--dim);padding:4px 0;">Loading templates…</div>
+    </div>
     <div class="field-group">
       <label class="field-label">Initial prompt <span class="field-optional">(optional)</span></label>
       <textarea id="create-prompt" rows="3" placeholder="What should Claude work on first?"></textarea>
@@ -6105,8 +6137,42 @@ function saveQueue() {
   if (typeof _idb !== 'undefined') _idb.set('offline_queue', offlineQueue);
 }
 
-// ═══════ DEVICE NAME ═══════
+// ═══════ DEVICE NAME / CLOUD IDENTITY ═══════
+let _cloudEmail = '';
+
+async function _initIdentity() {
+  try {
+    const r = await fetch('/api/identity');
+    if (!r.ok) return;
+    const d = await r.json();
+    _cloudEmail = d.email || '';
+    if (!d.has_api_key) {
+      const banner = document.getElementById('no-apikey-banner');
+      if (banner) banner.style.display = '';
+    }
+    // Update settings section if already open
+    _applyIdentityToSettings();
+  } catch(e) {}
+}
+
+function _applyIdentityToSettings() {
+  const label = document.getElementById('settings-device-label');
+  const row = document.getElementById('settings-device-row');
+  const cur = document.getElementById('settings-device-current');
+  if (_cloudEmail) {
+    if (label) label.textContent = 'Account';
+    if (row) row.style.display = 'none';
+    if (cur) cur.textContent = _cloudEmail;
+  } else {
+    if (label) label.textContent = 'Device';
+    if (row) row.style.display = '';
+  }
+}
+
+_initIdentity();
+
 function _getDeviceName() {
+  if (_cloudEmail) return _cloudEmail;
   const custom = localStorage.getItem('amux_device_name');
   if (custom) return custom;
   const ua = navigator.userAgent;
@@ -9953,12 +10019,81 @@ function openCreate() {
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   _createBranchEdited = false;
+  // Reset template state
+  _selectedTemplate = null;
+  document.getElementById('tmpl-selected-wrap').style.display = 'none';
+  document.getElementById('tmpl-accordion').style.display = _templatesLoaded ? '' : 'none';
+  document.getElementById('tmpl-loading').style.display = _templatesLoaded ? 'none' : '';
+  _loadTemplates();
   document.getElementById('create-overlay').classList.add('active');
   setTimeout(() => document.getElementById('create-name').focus({ preventScroll: true }), 100);
 }
 function closeCreate() {
   document.getElementById('create-overlay').classList.remove('active');
   document.getElementById('ac-list').classList.remove('open');
+}
+
+// ── Templates ──
+let _selectedTemplate = null;
+let _allTemplates = [];
+let _templatesLoaded = false;
+
+async function _loadTemplates() {
+  if (_templatesLoaded) { _renderTemplateAccordion(); return; }
+  try {
+    const r = await fetch(API + '/api/templates');
+    _allTemplates = await r.json();
+    _templatesLoaded = true;
+  } catch(e) { _allTemplates = []; }
+  _renderTemplateAccordion();
+}
+
+function _renderTemplateAccordion() {
+  const loading = document.getElementById('tmpl-loading');
+  const acc = document.getElementById('tmpl-accordion');
+  if (loading) loading.style.display = 'none';
+  if (!acc) return;
+  if (!_allTemplates.length) {
+    acc.style.display = 'none';
+    return;
+  }
+  acc.innerHTML = _allTemplates.map((t, i) =>
+    `<div class="tmpl-item" id="tmpl-item-${i}">
+      <div class="tmpl-item-hdr" onclick="_toggleTmplItem(${i})">
+        <span class="tmpl-item-icon">${t.icon || '📋'}</span>
+        <span class="tmpl-item-label">${esc(t.label)}</span>
+        <span class="tmpl-item-chev">&#x25B6;</span>
+      </div>
+      <div class="tmpl-item-body">
+        <div class="tmpl-item-desc">${esc(t.description || '')}</div>
+        ${t.dirs && t.dirs.length ? `<div class="tmpl-item-dirs">Creates: ${t.dirs.map(d => `<code>${esc(d)}/</code>`).join(' ')}</div>` : ''}
+        <button class="btn" style="font-size:0.75rem;padding:3px 10px;" onclick="event.stopPropagation();_selectTemplate(${i})">Use this template</button>
+      </div>
+    </div>`
+  ).join('');
+  acc.style.display = '';
+}
+
+function _toggleTmplItem(i) {
+  document.getElementById('tmpl-item-' + i)?.classList.toggle('open');
+}
+
+function _selectTemplate(i) {
+  _selectedTemplate = _allTemplates[i];
+  document.getElementById('tmpl-accordion').style.display = 'none';
+  document.getElementById('tmpl-selected-wrap').style.display = '';
+  document.getElementById('tmpl-selected-text').textContent = (_selectedTemplate.icon || '') + ' ' + _selectedTemplate.label;
+  // Auto-fill initial prompt if field is empty and template has one
+  const promptEl = document.getElementById('create-prompt');
+  if (_selectedTemplate.initial_prompt && !promptEl.value.trim()) {
+    promptEl.value = _selectedTemplate.initial_prompt;
+  }
+}
+
+function _clearTemplate() {
+  _selectedTemplate = null;
+  document.getElementById('tmpl-accordion').style.display = '';
+  document.getElementById('tmpl-selected-wrap').style.display = 'none';
 }
 function _createNameChanged(val) {
   // Auto-update branch name if user hasn't manually edited it
@@ -10007,7 +10142,9 @@ async function _suggestBranch() {
 async function submitCreate() {
   const name = document.getElementById('create-name').value.trim();
   const dir = document.getElementById('create-dir').value.trim();
-  const prompt = document.getElementById('create-prompt').value.trim();
+  const typedPrompt = document.getElementById('create-prompt').value.trim();
+  // Use typed prompt, fall back to template's initial_prompt if field is empty
+  const prompt = typedPrompt || (_selectedTemplate && _selectedTemplate.initial_prompt ? _selectedTemplate.initial_prompt : '');
   const branchEnabled = document.getElementById('create-branch-enabled').checked;
   const branch = branchEnabled ? document.getElementById('create-branch').value.trim() : '';
   if (!name) { document.getElementById('create-name').focus({ preventScroll: true }); return; }
@@ -10028,6 +10165,13 @@ async function submitCreate() {
   });
   if (r && r.ok) {
     if (dir) _addRecentDir(dir);
+    // Apply template if selected (creates dirs + writes CLAUDE.md before session starts)
+    if (_selectedTemplate && dir) {
+      await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/apply-template', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ template_id: _selectedTemplate.id, dir }),
+      }).catch(() => {});
+    }
     // Create branch if requested
     if (branch && dir) {
       await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/git', {
@@ -13398,22 +13542,26 @@ function toggleSettings() {
   const menu = document.getElementById('settings-menu');
   const open = menu.classList.toggle('open');
   if (open) {
-    // Show effective device name and populate override input
-    const effective = _getDeviceName();
-    const custom = localStorage.getItem('amux_device_name') || '';
-    document.getElementById('settings-device-current').textContent = effective;
-    const inp = document.getElementById('settings-device-name');
-    inp.value = custom;
-    // Auto-detected name as placeholder so user knows what they'd override
-    const ua = navigator.userAgent;
-    let auto = 'Unknown';
-    if (/iPhone/.test(ua)) auto = 'iPhone';
-    else if (/iPad/.test(ua)) auto = 'iPad';
-    else if (/Android/.test(ua)) auto = 'Android';
-    else if (/Windows/.test(ua)) auto = 'Windows';
-    else if (/Mac/.test(ua)) auto = 'Mac';
-    else if (/Linux/.test(ua)) auto = 'Linux';
-    inp.placeholder = custom ? 'Override (' + auto + ')' : auto + ' (auto-detected)';
+    // Apply cloud identity (email) or device name
+    _applyIdentityToSettings();
+    if (!_cloudEmail) {
+      // Show effective device name and populate override input
+      const effective = _getDeviceName();
+      const custom = localStorage.getItem('amux_device_name') || '';
+      document.getElementById('settings-device-current').textContent = effective;
+      const inp = document.getElementById('settings-device-name');
+      inp.value = custom;
+      // Auto-detected name as placeholder so user knows what they'd override
+      const ua = navigator.userAgent;
+      let auto = 'Unknown';
+      if (/iPhone/.test(ua)) auto = 'iPhone';
+      else if (/iPad/.test(ua)) auto = 'iPad';
+      else if (/Android/.test(ua)) auto = 'Android';
+      else if (/Windows/.test(ua)) auto = 'Windows';
+      else if (/Mac/.test(ua)) auto = 'Mac';
+      else if (/Linux/.test(ua)) auto = 'Linux';
+      inp.placeholder = custom ? 'Override (' + auto + ')' : auto + ' (auto-detected)';
+    }
     // Render servers
     renderSettingsServerList();
     // Close add form
@@ -15004,6 +15152,26 @@ class CCHandler(BaseHTTPRequestHandler):
             except PermissionError:
                 return self._json([])
 
+        # GET /api/templates
+        if method == "GET" and path == "/api/templates":
+            result = []
+            if TEMPLATES_DIR.is_dir():
+                for d in sorted(TEMPLATES_DIR.iterdir()):
+                    if not d.is_dir():
+                        continue
+                    meta_file = d / "template.json"
+                    claude_file = d / "CLAUDE.md"
+                    if not meta_file.exists():
+                        continue
+                    try:
+                        meta = json.loads(meta_file.read_text())
+                        if claude_file.exists():
+                            meta["claude_md_preview"] = claude_file.read_text()[:500]
+                        result.append(meta)
+                    except Exception:
+                        pass
+            return self._json(result)
+
         # GET /api/ls?path=...&hidden=0|1
         if method == "GET" and path == "/api/ls":
             ls_path = qs.get("path", [""])[0]
@@ -15903,6 +16071,12 @@ class CCHandler(BaseHTTPRequestHandler):
                 ).fetchall()
                 return self._json([dict(r) for r in rows])
 
+        # ── Identity (cloud user info forwarded by gateway) ──────────────────
+        if path == "/api/identity" and method == "GET":
+            email = self.headers.get("X-Amux-User-Email", "")
+            has_key = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+            return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key})
+
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
             _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
@@ -16297,6 +16471,27 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             if action == "wake":
                 ok, msg = wake_session(name)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+            if action == "apply-template":
+                body = self._read_body()
+                tmpl_id = re.sub(r'[^a-z0-9\-]', '', body.get("template_id", ""))
+                work_dir = body.get("dir", "").strip()
+                tmpl_path = TEMPLATES_DIR / tmpl_id
+                if not tmpl_path.is_dir():
+                    return self._json({"error": "template not found"}, 404)
+                meta_file = tmpl_path / "template.json"
+                claude_file = tmpl_path / "CLAUDE.md"
+                work = Path(work_dir).expanduser().resolve() if work_dir else None
+                if work:
+                    work.mkdir(parents=True, exist_ok=True)
+                    meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
+                    for d in meta.get("dirs", []):
+                        try: (work / d).mkdir(parents=True, exist_ok=True)
+                        except Exception: pass
+                    if claude_file.exists():
+                        dest = work / "CLAUDE.md"
+                        if not dest.exists():
+                            dest.write_text(claude_file.read_text())
+                return self._json({"ok": True})
             if action == "delete":
                 if is_running(name):
                     stop_session(name)

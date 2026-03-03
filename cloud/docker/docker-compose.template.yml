@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     volumes:
       - amux-data:/root/.amux
+      - /opt/amux-cloud/app/amux-server.py:/app/amux-server.py:ro
     environment:
       AMUX_PORT: "8822"
     ports:

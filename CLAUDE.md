@@ -14,6 +14,14 @@ Single-file project: everything lives in `amux-server.py` (Python server + inlin
 - The server auto-restarts on file save (watches its own mtime), so changes are live immediately.
 - Always verify Python syntax after edits: `python3 -c "import ast; ast.parse(open('amux-server.py').read())"`
 
+## Single-codebase rule (CRITICAL)
+
+**`amux-server.py` is identical for both local (OSS) and cloud deployments — no exceptions.**
+
+- Never add cloud-only or OSS-only code branches (no `if IS_CLOUD`, no `if os.environ.get('CLOUD')`).
+- Features that differ between environments must be driven by headers/env vars injected by the gateway (e.g., `X-Amux-User-Email`) or by presence/absence of configuration, not by build-time flags.
+- `cloud/docker/amux-server.py` must never be committed — it is auto-generated during deploy. It is in `.gitignore`.
+
 ## Server config — `~/.amux/server.env`
 
 Persistent env vars for the server. Loaded at startup via `os.environ.setdefault` so process-level env always wins. Survives `os.execv` auto-restarts.

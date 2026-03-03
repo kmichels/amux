@@ -280,7 +280,7 @@ def _reaper():
 threading.Thread(target=_reaper, daemon=True).start()
 
 # ── Proxy helper ───────────────────────────────────────────────────────────────
-def proxy(handler, port, path, qs):
+def proxy(handler, port, path, qs, user_email=""):
     url = f"http://127.0.0.1:{port}{path}"
     if qs:
         url += "?" + qs
@@ -288,9 +288,10 @@ def proxy(handler, port, path, qs):
     body = handler.rfile.read(length) if length else None
     # Strip auth headers so container doesn't see them
     skip = {"host", "content-length", "authorization", "cookie"}
-    req = urllib.request.Request(url, data=body, method=handler.command,
-                                  headers={k: v for k, v in handler.headers.items()
-                                           if k.lower() not in skip})
+    fwd = {k: v for k, v in handler.headers.items() if k.lower() not in skip}
+    if user_email:
+        fwd["X-Amux-User-Email"] = user_email
+    req = urllib.request.Request(url, data=body, method=handler.command, headers=fwd)
     try:
         resp = urllib.request.urlopen(req, timeout=60)
         handler.send_response(resp.status)
@@ -453,6 +454,7 @@ class Handler(BaseHTTPRequestHandler):
                 db.commit()
 
         port = row["port"]
+        user_email = row["email"] or email  # prefer DB email, fallback to JWT
 
         # Wake container if needed
         if not container_running(user_id):
@@ -461,7 +463,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"error": f"failed to start instance: {e}"}, 503)
 
-        proxy(self, port, path, qs)
+        proxy(self, port, path, qs, user_email=user_email)
 
     def do_GET(self):    self._handle()
     def do_POST(self):   self._handle()

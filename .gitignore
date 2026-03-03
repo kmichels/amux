@@ -5,3 +5,5 @@ __pycache__/
 node_modules/
 package-lock.json
 scratch/
+# Generated during cloud deploy — always copied from root amux-server.py
+cloud/docker/amux-server.py
