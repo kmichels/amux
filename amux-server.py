@@ -14860,7 +14860,27 @@ function _notesInitQuill() {
     placeholder: 'Write your note…'
   });
   _quill.on('text-change', (delta, old, source) => {
-    if (source !== 'api') _notesSaveDebounce();
+    if (source === 'api') return;
+    // Sync H1 → title input when user edits the heading in Quill directly
+    const first = _quill.root.firstElementChild;
+    if (first && first.tagName === 'H1') {
+      const h1Text = first.textContent.trim();
+      const titleEl = document.getElementById('notes-title');
+      if (titleEl && titleEl.value !== h1Text) {
+        titleEl.value = h1Text;
+        if (_notesActive) {
+          _notesActive.title = h1Text;
+          const activeEl = document.querySelector('#notes-list .notes-list-item.active');
+          if (activeEl) {
+            const s = activeEl.querySelector('.nli-title');
+            if (s) s.textContent = h1Text || _notesActive.path.replace(/\.md$/, '');
+          }
+          const entry = _notesAllNotes.find(n => n.path === _notesActive.path);
+          if (entry) entry.name = h1Text || entry.path.replace(/\.md$/, '');
+        }
+      }
+    }
+    _notesSaveDebounce();
   });
 }
 
@@ -14905,6 +14925,12 @@ function _notesSearchFilter(q) {
 }
 
 async function _notesOpen(path) {
+  // Flush any pending save before switching notes
+  if (_notesSaveTimer) {
+    clearTimeout(_notesSaveTimer);
+    _notesSaveTimer = null;
+    await _notesSave();
+  }
   const r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')));
   if (!r.ok) return;
   const data = await r.json();
@@ -14977,19 +15003,6 @@ function _notesSaveDebounce() {
 
 async function _notesSave() {
   if (!_notesActive || !_quill) return;
-  // Ensure title is reflected as H1 in content before saving
-  const title = document.getElementById('notes-title').value.trim();
-  if (title && _quill) {
-    const root = _quill.root;
-    const first = root.firstElementChild;
-    if (first && first.tagName === 'H1') {
-      if (first.textContent !== title) first.textContent = title;
-    } else {
-      const h1 = document.createElement('h1');
-      h1.textContent = title;
-      root.insertBefore(h1, root.firstChild);
-    }
-  }
   const content = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), {
