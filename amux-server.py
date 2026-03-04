@@ -7159,8 +7159,12 @@ function render() {
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
   updatePeekStatus();
   const el = document.getElementById('cards');
+  // Skip re-render while user has focus inside any card input/textarea — prevents cursor reset and value loss
+  const _active = document.activeElement;
+  if (_active && _active.closest && _active.closest('#cards') &&
+      (_active.tagName === 'TEXTAREA' || _active.tagName === 'INPUT')) return;
   // Save focused element before ANY DOM changes — captures search-input, send-input, or anything else
-  const focusedId = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
+  const focusedId = _active && _active.id ? _active.id : null;
   updateActiveCount();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
@@ -7220,10 +7224,10 @@ function render() {
     if (focusedId) { const f = document.getElementById(focusedId); if (f) f.focus({ preventScroll: true }); }
     return;
   }
-  // Save input values before re-rendering (focusedId already captured at top)
+  // Save input values + cursor positions before re-rendering
   const savedInputs = {};
   el.querySelectorAll('.send-input').forEach(inp => {
-    if (inp.value) savedInputs[inp.id] = inp.value;
+    if (inp.value) savedInputs[inp.id] = { value: inp.value, start: inp.selectionStart, end: inp.selectionEnd };
   });
 
   function _renderSessionCard(s) {
@@ -7338,8 +7342,8 @@ function render() {
       return ai - bi;
     });
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
-    for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = val; autoGrow(inp); } }
-    if (focusedId) { const inp = document.getElementById(focusedId); if (inp) inp.focus({ preventScroll: true }); }
+    for (const [id, d] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = d.value; autoGrow(inp); } }
+    if (focusedId) { const inp = document.getElementById(focusedId); if (inp) { inp.focus({ preventScroll: true }); const d = savedInputs[focusedId]; if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; } } }
     _renderArchivedSection();
     requestAnimationFrame(initSortable);
     return;
@@ -7408,14 +7412,18 @@ function render() {
   }
   _updateResetBtn();
 
-  // Restore input values and focus after re-rendering
-  for (const [id, val] of Object.entries(savedInputs)) {
+  // Restore input values, cursor positions and focus after re-rendering
+  for (const [id, d] of Object.entries(savedInputs)) {
     const inp = document.getElementById(id);
-    if (inp) { inp.value = val; autoGrow(inp); }
+    if (inp) { inp.value = d.value; autoGrow(inp); }
   }
   if (focusedId) {
     const inp = document.getElementById(focusedId);
-    if (inp) inp.focus({ preventScroll: true });
+    if (inp) {
+      inp.focus({ preventScroll: true });
+      const d = savedInputs[focusedId];
+      if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; }
+    }
   }
 
   _renderArchivedSection();
@@ -7664,11 +7672,36 @@ let hiddenTabs = (function() {
   return new Set(['notifications']); // default: notifications hidden
 })();
 
+let tabOrder = (function() {
+  try {
+    const s = localStorage.getItem('amux_tab_order');
+    if (s) {
+      const saved = JSON.parse(s);
+      // Merge: keep saved order, append any new tabs not yet in saved
+      const all = ALL_TABS.map(t => t.id);
+      return [...saved.filter(id => all.includes(id)), ...all.filter(id => !saved.includes(id))];
+    }
+  } catch(e) {}
+  return ALL_TABS.map(t => t.id);
+})();
+
 function _saveHiddenTabs() {
   localStorage.setItem('amux_hidden_tabs', JSON.stringify([...hiddenTabs]));
 }
 
+function _saveTabOrder() {
+  localStorage.setItem('amux_tab_order', JSON.stringify(tabOrder));
+}
+
 function _applyTabVisibility() {
+  const bar = document.querySelector('.tab-bar');
+  if (!bar) return;
+  // Reorder buttons in DOM to match tabOrder
+  tabOrder.forEach(id => {
+    const el = document.getElementById('tab-' + id);
+    if (el) bar.appendChild(el); // moves to end in order
+  });
+  // Apply visibility
   ALL_TABS.forEach(t => {
     const el = document.getElementById('tab-' + t.id);
     if (el) el.style.display = hiddenTabs.has(t.id) ? 'none' : '';
@@ -7692,15 +7725,31 @@ function toggleTabCustomizer() {
 function _renderTabCustomizerMenu() {
   const menu = document.getElementById('tab-customizer-menu');
   if (!menu) return;
-  menu.innerHTML = ALL_TABS.map(t => {
+  // Render in tabOrder order
+  const orderedTabs = tabOrder.map(id => ALL_TABS.find(t => t.id === id)).filter(Boolean);
+  menu.innerHTML = orderedTabs.map(t => {
     const checked = !hiddenTabs.has(t.id);
     const req = t.required ? ' required' : '';
     const disabled = t.required ? ' disabled' : '';
-    return `<label class="tab-customizer-item${req}" onclick="event.stopPropagation()">
+    return `<label class="tab-customizer-item${req}" data-tab-id="${t.id}" onclick="event.stopPropagation()">
+      <span class="tab-drag-handle" title="Drag to reorder" style="cursor:grab;color:var(--dim);padding:0 4px 0 0;font-size:0.8rem;">⠿</span>
       <input type="checkbox" ${checked ? 'checked' : ''}${disabled} onchange="toggleTabVisibility('${t.id}',this.checked)">
       ${t.label}
     </label>`;
   }).join('');
+  // Init Sortable on menu for drag-to-reorder
+  if (window.Sortable) {
+    Sortable.create(menu, {
+      handle: '.tab-drag-handle',
+      animation: 100,
+      onEnd(evt) {
+        const ids = [...menu.querySelectorAll('[data-tab-id]')].map(el => el.dataset.tabId);
+        tabOrder = ids;
+        _saveTabOrder();
+        _applyTabVisibility();
+      }
+    });
+  }
 }
 
 function toggleTabVisibility(id, show) {
@@ -14860,7 +14909,17 @@ async function _notesNew() {
 
 function _notesTitleChange() {
   if (!_notesActive) return;
-  _notesActive.title = document.getElementById('notes-title').value;
+  const newTitle = document.getElementById('notes-title').value;
+  _notesActive.title = newTitle;
+  // Update sidebar list item immediately
+  const activeEl = document.querySelector('#notes-list .notes-list-item.active');
+  if (activeEl) {
+    const titleEl = activeEl.querySelector('.nli-title');
+    if (titleEl) titleEl.textContent = newTitle || _notesActive.path.replace(/\.md$/, '');
+  }
+  // Also update in-memory list so re-renders stay in sync
+  const listEntry = _notesAllNotes.find(n => n.path === _notesActive.path);
+  if (listEntry) listEntry.name = newTitle || listEntry.path.replace(/\.md$/, '');
   _notesSaveDebounce();
 }
 
