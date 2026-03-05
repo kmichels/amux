@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     volumes:
       - amux-data:/root/.amux
+      - projects-data:/root/projects
       - /opt/amux-cloud/app/amux-server.py:/app/amux-server.py:ro
       - /opt/amux-cloud/app/icon.svg:/app/icon.svg:ro
       - /opt/amux-cloud/app/icon.png:/app/icon.png:ro
@@ -44,3 +45,5 @@ services:
 volumes:
   amux-data:
     name: amux-data-${USER_ID}
+  projects-data:
+    name: projects-data-${USER_ID}
