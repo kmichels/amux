@@ -2992,7 +2992,7 @@ def _auto_resume_sessions():
     if not CC_SESSIONS.exists():
         return
     for meta_file in sorted(CC_SESSIONS.glob("*.meta.json")):
-        name = meta_file.stem
+        name = meta_file.name.removesuffix(".meta.json")
         try:
             meta = json.loads(meta_file.read_text())
             if meta.get("start_count", 0) > 0 and (CC_SESSIONS / f"{name}.env").exists():
