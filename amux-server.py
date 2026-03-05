@@ -2979,6 +2979,29 @@ def _init_default_sessions():
             _write_env(helper_env, {"CC_DIR": str(repo_dir)})
 
 
+def _auto_resume_sessions():
+    """On startup, restart any session that was previously started.
+
+    This makes container restarts (reaper, deploy, crash) transparent —
+    sessions come back automatically without user intervention.
+    Only runs when tmux has no sessions (fresh container start, not os.execv reload).
+    """
+    r = subprocess.run(["tmux", "list-sessions"], capture_output=True, text=True)
+    if r.returncode == 0:
+        return  # tmux already has sessions — this is an os.execv reload, not a fresh start
+    if not CC_SESSIONS.exists():
+        return
+    for meta_file in sorted(CC_SESSIONS.glob("*.meta.json")):
+        name = meta_file.stem
+        try:
+            meta = json.loads(meta_file.read_text())
+            if meta.get("start_count", 0) > 0 and (CC_SESSIONS / f"{name}.env").exists():
+                ok, msg = start_session(name)
+                print(f"[auto-resume] {name}: {msg}")
+        except Exception as e:
+            print(f"[auto-resume] {name} failed: {e}")
+
+
 def _migrate_memory_files():
     """Startup migration: copy project-dir-keyed memory files to session-name-keyed.
 
@@ -18227,6 +18250,7 @@ def main():
     _init_db()
     _migrate_flat_to_sqlite()
     _init_default_sessions()
+    _auto_resume_sessions()
 
     # Pre-configure ~/.claude.json to skip interactive setup wizard
     _init_claude_config()
