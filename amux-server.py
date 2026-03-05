@@ -6645,8 +6645,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:2px;"><script>document.write(location.host)</script></div>
       <div style="margin:8px 0 4px;font-size:0.95rem;font-weight:600;cursor:pointer;" onclick="forceUpdate()" title="Tap to force update">v0.6.0 &#x21BB;</div>
       <div id="update-status" style="color:var(--dim);font-size:0.75rem;min-height:1.2em;"></div>
-      <button class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
+      <button id="pull-btn" class="btn" onclick="pullFromRemote(this)" style="margin-top:6px;font-size:0.72rem;padding:4px 12px;">&#x2B07; Pull from remote</button>
       <div id="pull-status" style="color:var(--dim);font-size:0.7rem;font-family:monospace;margin-top:4px;min-height:1.2em;white-space:pre-wrap;max-height:60px;overflow-y:auto;"></div>
+      <script>if(_cloudEmail){var _pb=document.getElementById('pull-btn');if(_pb)_pb.style.display='none';}</script>
     </div>
     <div id="daily-stats" style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;">
       <div style="color:var(--dim);font-size:0.75rem;text-align:center;">Loading token stats...</div>
@@ -16505,6 +16506,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 slog(f"[pull] rc={r.returncode} {output[:200]}")
                 if r.returncode == 0:
                     return self._json({"ok": True, "output": output})
+                if "not a git repository" in output:
+                    return self._json({"ok": False, "output": "No git repo here — updates deploy automatically."})
                 return self._json({"ok": False, "output": output}, 500)
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
