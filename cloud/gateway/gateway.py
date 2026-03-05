@@ -22,7 +22,7 @@ COMPOSE_TPL   = os.path.join(os.path.dirname(__file__), "../docker/docker-compos
 LITESTREAM_YML= os.path.join(os.path.dirname(__file__), "../litestream/litestream.yml")
 DATA_DIR      = os.environ.get("AMUX_CLOUD_DATA", "/var/amux/users")
 DB_PATH       = os.environ.get("GATEWAY_DB", "/var/amux/gateway.db")
-IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "600"))
+IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "3600"))
 PORT_BASE     = 9000
 COOKIE_MAX_AGE = 86400 * 7  # 7 days
 
@@ -232,14 +232,21 @@ def container_running(user_id):
         capture_output=True, text=True)
     return r.stdout.strip() == "true"
 
+def container_healthy(user_id):
+    r = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.Health.Status}}", f"amux-user-{user_id}"],
+        capture_output=True, text=True)
+    return r.stdout.strip() == "healthy"
+
 def start_container(user_id, port):
     _write_compose(user_id, port)
     d = _compose_dir(user_id)
     subprocess.run(["docker", "compose", "up", "-d"], cwd=d,
                    capture_output=True, check=True)
-    for _ in range(20):
+    # Wait for healthy (amux-server.py ready), not just running
+    for _ in range(40):
         time.sleep(1)
-        if container_running(user_id):
+        if container_healthy(user_id):
             break
 
 def stop_container(user_id):
@@ -366,7 +373,7 @@ def _reaper():
 threading.Thread(target=_reaper, daemon=True).start()
 
 # ── Proxy helper ───────────────────────────────────────────────────────────────
-def proxy(handler, port, path, qs, user_email=""):
+def proxy(handler, port, path, qs, user_email="", user_id=None):
     url = f"http://127.0.0.1:{port}{path}"
     if qs:
         url += "?" + qs
@@ -387,7 +394,9 @@ def proxy(handler, port, path, qs, user_email=""):
                 handler.send_header(k, v)
         handler.end_headers()
         if is_sse:
-            # Stream SSE chunk-by-chunk so client gets events immediately
+            # Stream SSE chunk-by-chunk; refresh last_seen every 60s so
+            # the reaper doesn't kill containers with active SSE connections.
+            last_touch = time.time()
             try:
                 while True:
                     chunk = resp.read(4096)
@@ -395,6 +404,15 @@ def proxy(handler, port, path, qs, user_email=""):
                         break
                     handler.wfile.write(chunk)
                     handler.wfile.flush()
+                    if user_id and time.time() - last_touch > 60:
+                        try:
+                            db = get_db()
+                            db.execute("UPDATE users SET last_seen=? WHERE id=?",
+                                       (int(time.time()), user_id))
+                            db.commit()
+                        except Exception:
+                            pass
+                        last_touch = time.time()
             except (BrokenPipeError, ConnectionResetError):
                 pass
         else:
@@ -792,13 +810,13 @@ class Handler(BaseHTTPRequestHandler):
                 org_cookie = ""
 
         # Wake target container if needed
-        if not container_running(target_user_id):
+        if not container_healthy(target_user_id):
             try:
                 start_container(target_user_id, target_port)
             except Exception as e:
                 return self._json({"error": f"failed to start instance: {e}"}, 503)
 
-        proxy(self, target_port, path, qs, user_email=target_email)
+        proxy(self, target_port, path, qs, user_email=target_email, user_id=target_user_id)
 
     def do_GET(self):    self._handle()
     def do_POST(self):   self._handle()
