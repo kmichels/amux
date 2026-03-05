@@ -5806,9 +5806,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="settings-section" id="settings-connections-section">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
             <div class="settings-section-label" style="margin:0;">Connections</div>
-            <button onclick="_addConnectionPrompt()" style="background:none;border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:0.7rem;color:var(--dim);cursor:pointer;">+ Add</button>
+            <button id="add-conn-btn" onclick="_toggleAddConnectionForm()" style="background:none;border:1px solid var(--border);border-radius:4px;padding:1px 8px;font-size:0.7rem;color:var(--dim);cursor:pointer;">+ Add</button>
           </div>
           <div id="settings-connections-list" style="display:flex;flex-direction:column;gap:4px;"></div>
+          <div id="add-conn-form" style="display:none;margin-top:8px;padding:8px;background:var(--bg3);border-radius:6px;">
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+              <button onclick="_addConnPreset('Cloud','https://cloud.amux.io')" style="flex:1;background:none;border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.68rem;color:var(--dim);cursor:pointer;">&#x2601; cloud.amux.io</button>
+              <button onclick="_addConnPreset('Local','https://localhost:8822')" style="flex:1;background:none;border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.68rem;color:var(--dim);cursor:pointer;">&#x1F4BB; localhost</button>
+            </div>
+            <input id="add-conn-name" type="text" placeholder="Name (e.g. Cloud)" autocomplete="off"
+              style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 7px;font-size:0.78rem;color:var(--fg);margin-bottom:5px;outline:none;">
+            <input id="add-conn-url" type="text" placeholder="URL (e.g. https://cloud.amux.io)" autocomplete="off"
+              onkeydown="if(event.key==='Enter')_addConnectionSave()"
+              style="width:100%;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 7px;font-size:0.78rem;color:var(--fg);margin-bottom:6px;outline:none;">
+            <div style="display:flex;gap:6px;">
+              <button onclick="_addConnectionSave()" style="flex:1;background:var(--accent);color:#000;border:none;border-radius:4px;padding:3px 0;font-size:0.75rem;cursor:pointer;font-weight:600;">Add</button>
+              <button onclick="_toggleAddConnectionForm(false)" style="flex:1;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 0;font-size:0.75rem;color:var(--dim);cursor:pointer;">Cancel</button>
+            </div>
+          </div>
         </div>
         <div class="settings-section" style="text-align:center;display:flex;flex-direction:column;gap:8px;">
           <span style="font-size:0.7rem;color:var(--dim);cursor:pointer;" onclick="openSkills();closeSettings()">&#x26A1; Skills &amp; commands</span>
@@ -6993,14 +7008,36 @@ function _removeConnection(i) {
   _renderInstanceSwitcher();
 }
 
-function _addConnectionPrompt() {
-  const name = prompt('Connection name (e.g. "Cloud", "Local Tailscale"):');
-  if (!name) return;
-  const url = prompt('URL (e.g. https://cloud.amux.io or http://100.x.x.x:8822):');
-  if (!url) return;
+function _toggleAddConnectionForm(show) {
+  const form = document.getElementById('add-conn-form');
+  if (!form) return;
+  const visible = show !== undefined ? show : (form.style.display === 'none' || !form.style.display);
+  form.style.display = visible ? '' : 'none';
+  if (visible) {
+    const ni = document.getElementById('add-conn-name');
+    const ui = document.getElementById('add-conn-url');
+    if (ni) { ni.value = ''; ni.focus(); }
+    if (ui) ui.value = '';
+  }
+}
+
+function _addConnPreset(name, url) {
+  const ni = document.getElementById('add-conn-name');
+  const ui = document.getElementById('add-conn-url');
+  if (ni) ni.value = name;
+  if (ui) { ui.value = url; ui.focus(); }
+}
+
+function _addConnectionSave() {
+  const ni = document.getElementById('add-conn-name');
+  const ui = document.getElementById('add-conn-url');
+  const name = (ni ? ni.value : '').trim();
+  const url = (ui ? ui.value : '').trim().replace(/\/$/, '');
+  if (!name || !url) return;
   const conns = _loadConnections();
-  conns.push({ name: name.trim(), url: url.trim().replace(/\/$/, '') });
+  conns.push({ name, url });
   _saveConnections(conns);
+  _toggleAddConnectionForm(false);
   _renderInstanceSwitcher();
 }
 
