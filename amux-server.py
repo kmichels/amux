@@ -16496,7 +16496,14 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # POST /api/pull — git pull in the repo directory
         if method == "POST" and path == "/api/pull":
-            repo_dir = Path(__file__).resolve().parent
+            # Walk up from __file__ to find nearest .git directory
+            _candidate = Path(__file__).resolve().parent
+            repo_dir = _candidate
+            while _candidate != _candidate.parent:
+                if (_candidate / ".git").exists():
+                    repo_dir = _candidate
+                    break
+                _candidate = _candidate.parent
             try:
                 r = subprocess.run(
                     ["git", "pull", "--ff-only"],
