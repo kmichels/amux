@@ -15831,7 +15831,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     rel = str(f.relative_to(CC_NOTES))
                     stat = f.stat()
                     try:
-                        chunk = f.read_bytes(512).decode("utf-8", errors="replace")
+                        with open(f, "rb") as _fh: chunk = _fh.read(512).decode("utf-8", errors="replace")
                         import re as _re
                         m_html = _re.search(r'<h1[^>]*>(.*?)</h1>', chunk, _re.IGNORECASE)
                         if m_html:
