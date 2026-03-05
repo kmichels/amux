@@ -8119,7 +8119,7 @@ let editState = null;  // {session, field, current}
 function editField(session, field, current) {
   closeAllMenus();
   const titles = { name: 'Rename session', model: 'Change model', dir: 'Change directory', desc: 'Set description', tags: 'Edit tags', duplicate: 'Duplicate session', clone: 'Clone & continue' };
-  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
+  const placeholders = { name: 'Session name', model: 'e.g. opus, sonnet, haiku', dir: window._cloudEmail ? '/root' : '/path/to/project', desc: 'Brief description...', tags: 'e.g. work, frontend, urgent', duplicate: 'New session name', clone: 'New session name' };
   document.getElementById('edit-title').textContent = titles[field] || 'Edit';
   const inp = document.getElementById('edit-input');
   const sel = document.getElementById('edit-select');
@@ -10823,7 +10823,7 @@ let _createBranchEdited = false;  // track if user manually changed branch name
 
 function openCreate() {
   document.getElementById('create-name').value = '';
-  document.getElementById('create-dir').value = (_filesCwd && _filesCwd !== '/') ? _filesCwd : '';
+  document.getElementById('create-dir').value = (_filesCwd && _filesCwd !== '/') ? _filesCwd : (window._cloudEmail ? '/root' : '');
   document.getElementById('create-prompt').value = '';
   document.getElementById('create-branch').value = '';
   document.getElementById('create-branch-enabled').checked = false;
