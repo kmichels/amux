@@ -3115,6 +3115,50 @@ curl -sk -X POST -H 'Content-Type: application/json' \\
 # Delete a note (moves to trash)
 curl -sk -X DELETE $AMUX_URL/api/notes/my-note
 ```
+
+### Google Drive — use the API, not Chrome MCP
+
+Always use the Drive REST API directly. Do NOT open drive.google.com in Chrome MCP — that is slow and fragile.
+
+```bash
+# Get an access token (ADC — works after `gcloud auth application-default login`)
+TOKEN=$(python3 -c "
+import google.auth, google.auth.transport.requests
+creds, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/drive'])
+creds.refresh(google.auth.transport.requests.Request())
+print(creds.token)
+")
+PROJ="mixpeek-inference-463103"
+
+# List files / search by name
+curl -sk -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJ" \\
+  "https://www.googleapis.com/drive/v3/files?q=name%3D'Partners'&fields=files(id,name,mimeType)"
+
+# Create a folder
+curl -sk -X POST -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJ" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"My Folder","mimeType":"application/vnd.google-apps.folder"}' \\
+  https://www.googleapis.com/drive/v3/files
+
+# Create a folder inside a parent (use id from above)
+curl -sk -X POST -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJ" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"Sub Folder","mimeType":"application/vnd.google-apps.folder","parents":["PARENT_ID"]}' \\
+  https://www.googleapis.com/drive/v3/files
+
+# Create a Google Doc inside a folder
+curl -sk -X POST -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJ" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"name":"My Doc","mimeType":"application/vnd.google-apps.document","parents":["PARENT_ID"]}' \\
+  https://www.googleapis.com/drive/v3/files
+
+# Write text content into a Google Doc (Docs API)
+DOC_ID="..."  # id from create response
+curl -sk -X POST -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJ" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"requests":[{"insertText":{"location":{"index":1},"text":"Hello world\\n"}}]}' \\
+  "https://docs.googleapis.com/v1/documents/$DOC_ID:batchUpdate"
+```
 """
 
 
