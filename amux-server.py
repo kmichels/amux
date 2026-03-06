@@ -3118,6 +3118,71 @@ curl -sk -X POST -H 'Content-Type: application/json' \\
 curl -sk -X DELETE $AMUX_URL/api/notes/my-note
 ```
 
+### Browser automation — use the amux browser API (preferred)
+
+The amux browser is a shared Playwright instance accessible via the REST API. **This is the preferred way to automate browsers** — it uses saved auth profiles, supports screenshots, and sessions can share the same browser context.
+
+```bash
+# 1. Start browser with saved auth profile (default or named)
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"profile":"default","url":"https://example.com"}' \
+  $AMUX_URL/api/browser/start
+
+# 2. Navigate
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/dashboard"}' \
+  $AMUX_URL/api/browser/navigate
+
+# 3. Take a screenshot (returns JPEG bytes; save with -o screenshot.jpg)
+curl -sk $AMUX_URL/api/browser/screenshot -o /tmp/screen.jpg
+
+# 4. Click at coordinates
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"click","x":640,"y":400}' \
+  $AMUX_URL/api/browser/action
+
+# 5. Type text
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"type","text":"hello world"}' \
+  $AMUX_URL/api/browser/action
+
+# 6. Press a key (Enter, Tab, Escape, ArrowDown, etc.)
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"key","key":"Enter"}' \
+  $AMUX_URL/api/browser/action
+
+# 7. Scroll (dy > 0 = down)
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"scroll","dy":500}' \
+  $AMUX_URL/api/browser/action
+
+# 8. Evaluate JavaScript — returns result as JSON
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"eval","script":"document.title"}' \
+  $AMUX_URL/api/browser/action
+
+# 9. List available auth profiles
+curl -sk $AMUX_URL/api/browser/profiles
+
+# 10. AI agent — give it a task in plain English, it drives the browser autonomously
+curl -sk -X POST -H 'Content-Type: application/json' \
+  -d '{"task":"Log in and find the latest invoice","profile":"default"}' \
+  $AMUX_URL/api/browser/agent
+# Poll for completion:
+curl -sk $AMUX_URL/api/browser/agent/status
+
+# 11. Stop browser
+curl -sk -X POST $AMUX_URL/api/browser/stop
+```
+
+**Use raw Playwright** (`launchPersistentContext`) only when you need parallel browsers or the amux browser is busy. In that case, always use:
+```javascript
+const ctx = await chromium.launchPersistentContext(
+  `${homedir()}/.amux/playwright-auth/profile`,   // default profile
+  { headless: true, ignoreHTTPSErrors: true }
+);
+```
+
 ### Browser automation — always use saved auth profiles
 
 When you need to control a browser with Playwright, **always** use `launchPersistentContext` with the amux auth profile so you get saved cookies and logged-in sessions. Never use `chromium.launch()` — that opens a fresh anonymous browser with no auth.
