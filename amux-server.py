@@ -4480,7 +4480,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; justify-content: space-between; align-items: center;
     margin-bottom: 8px; flex-shrink: 0;
   }
-  .file-overlay-header h2 { font-size: 1rem; word-break: break-all; flex: 1; margin-right: 8px; }
+  .file-overlay-header h2 { font-size: 1rem; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 8px; }
   .file-overlay-body {
     flex: 1; overflow: auto; background: #010409; border: 1px solid var(--border); border-radius: 8px;
     padding: 14px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
