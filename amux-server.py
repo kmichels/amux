@@ -6658,8 +6658,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="notes-mode-tabs" id="notes-mode-tabs" style="display:none;">
-      <button class="notes-mode-tab" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
-      <button class="notes-mode-tab active" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
+      <button class="notes-mode-tab active" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
+      <button class="notes-mode-tab" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
     </div>
     <div class="notes-quill-wrap" id="notes-quill-wrap" style="display:none;">
       <div id="notes-quill"></div>
@@ -15964,7 +15964,7 @@ let _notesAllNotes = [];
 let _quill = null;
 let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
 let _notesOpenAbort = null; // AbortController for in-flight note fetches
-let _notesMode = 'preview'; // 'edit' | 'preview'
+let _notesMode = 'edit'; // 'edit' | 'preview'
 
 function _notesPreviewBindCheckboxes(container) {
   // Make data-list=check items interactive in preview — clicking toggles Quill delta
@@ -16210,15 +16210,14 @@ async function _notesOpen(path) {
   }
   document.getElementById('notes-empty-state').style.display = 'none';
   document.getElementById('notes-mode-tabs').style.display = 'flex';
-  // Always show preview when switching notes; user can click Edit to type
-  _notesMode = 'preview';
-  document.getElementById('notes-tab-edit').classList.remove('active');
-  document.getElementById('notes-tab-preview').classList.add('active');
-  document.getElementById('notes-quill-wrap').style.display = 'none';
+  // Always show edit mode when switching notes
+  _notesMode = 'edit';
+  document.getElementById('notes-tab-edit').classList.add('active');
+  document.getElementById('notes-tab-preview').classList.remove('active');
+  document.getElementById('notes-quill-wrap').style.display = '';
   const previewEl = document.getElementById('notes-preview');
-  previewEl.innerHTML = isHtml ? data.content : (typeof marked !== 'undefined' ? marked.parse(data.content || '') : data.content);
-  _notesPreviewBindCheckboxes(previewEl);
-  previewEl.classList.add('active');
+  previewEl.innerHTML = '';
+  previewEl.classList.remove('active');
   quillRoot.style.opacity = '1';
   _notesSidebarUpdateActive(path);
   _notesUpdatePinBtn();
