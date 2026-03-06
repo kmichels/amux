@@ -3121,6 +3121,33 @@ curl -sk -X POST -H 'Content-Type: application/json' \\
 curl -sk -X DELETE $AMUX_URL/api/notes/my-note
 ```
 
+### Browser automation — always use saved auth profiles
+
+When you need to control a browser with Playwright, **always** use `launchPersistentContext` with the amux auth profile so you get saved cookies and logged-in sessions. Never use `chromium.launch()` — that opens a fresh anonymous browser with no auth.
+
+```javascript
+const { chromium } = require('playwright');
+const { homedir } = require('os');
+
+// Default profile (use this unless you need a specific named profile)
+const ctx = await chromium.launchPersistentContext(
+  `${homedir()}/.amux/playwright-auth/profile`,
+  { headless: true, ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } }
+);
+
+// Named profile (e.g. 'google', 'mixpeek-studio')
+const ctx = await chromium.launchPersistentContext(
+  `${homedir()}/.amux/playwright-auth/profiles/google`,
+  { headless: true, ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } }
+);
+
+const page = ctx.pages()[0] || await ctx.newPage();
+// ... do your automation ...
+await ctx.close();
+```
+
+To capture/save auth for a new site: use the `/playwright-auth` skill in amux.
+
 ### Google Drive — use the API, not Chrome MCP
 
 Always use the Drive REST API directly. Do NOT open drive.google.com in Chrome MCP — that is slow and fragile.
