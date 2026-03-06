@@ -4219,22 +4219,28 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#0d1117">
+<meta name="theme-color" content="#0a0a0c">
 <link rel="manifest" href="/manifest.json">
 <title>amux</title>
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" sizes="180x180" href="/icon.png">
 <link rel="apple-touch-icon" href="/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown-common-style.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg: #0d1117; --card: #161b22; --border: #30363d;
-    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
-    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --bg: #0a0a0c; --card: #111114; --border: #2a2a30;
+    --text: #e8e8ec; --dim: #8888a0; --accent: #4ade80;
+    --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
     --cyan: #39d2c0;
+    --bg2: #18181c; --fg: var(--text); --card-bg: var(--card);
+    --accent-dim: #22c55e; --accent-glow: rgba(74,222,128,0.15);
+    --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
   }
   body.light {
     --bg: #ffffff; --card: #f6f8fa; --border: #d0d7de;
@@ -4315,7 +4321,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   @keyframes spin { to { transform: rotate(360deg); } }
   html { font-size: 16px; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     background: var(--bg); color: var(--text);
     min-height: 100vh; min-height: 100dvh;
     max-width: 100vw; overflow-x: hidden;
@@ -4323,8 +4329,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding-bottom: max(16px, env(safe-area-inset-bottom));
     -webkit-text-size-adjust: 100%;
   }
-  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 16px; }
-  h1 .dim { color: var(--dim); font-weight: 400; font-size: 0.85rem; }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.008) 2px, rgba(255,255,255,0.008) 4px);
+    pointer-events: none;
+    z-index: 9999;
+  }
+  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 16px; font-family: var(--mono); color: var(--accent); letter-spacing: -0.03em; }
+  h1 .dim { color: var(--dim); font-weight: 400; font-size: 0.85rem; font-family: var(--mono); }
 
   /* Session cards — list mode (default) */
   .cards { display: flex; flex-direction: column; gap: 10px; }
@@ -6644,6 +6658,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="_rbHideNewProfile()" style="font-size:0.6rem;padding:1px 6px;">&#x2715;</button>
     </span>
     <button class="btn" id="rb-del-profile" onclick="_rbDeleteProfile()" style="font-size:0.6rem;padding:1px 6px;color:var(--red);display:none;" title="Delete profile">&#x2715;</button>
+    <button class="btn" onclick="_rbExportProfile()" style="font-size:0.6rem;padding:1px 6px;" title="Export profile as zip backup">&#x2913; Export</button>
+    <label class="btn" style="font-size:0.6rem;padding:1px 6px;cursor:pointer;" title="Import profile from zip backup">&#x2912; Import<input type="file" accept=".zip" style="display:none" onchange="_rbImportProfile(this)"></label>
     <span id="rb-profile-state" style="font-size:0.72rem;line-height:1;" title="Profile has saved login state"></span>
     <button class="btn" id="rb-login-btn" onclick="_rbShowLoginUrl()" style="font-size:0.6rem;padding:1px 8px;" title="Log in and save credentials to this profile">&#x1F511; Login</button>
     <span id="rb-login-url-form" style="display:none;align-items:center;gap:4px;">
@@ -10703,6 +10719,32 @@ async function _rbDeleteProfile() {
     if (_rbActive) await _rbStop();
     await _rbLoadProfiles();
   } catch(e) {}
+}
+
+async function _rbExportProfile() {
+  const name = document.getElementById('rb-profile').value || 'default';
+  const a = document.createElement('a');
+  a.href = API + '/api/browser/profiles/' + encodeURIComponent(name) + '/export';
+  a.download = name + '-profile.zip';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+async function _rbImportProfile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const name = document.getElementById('rb-profile').value || 'default';
+  const status = document.getElementById('rb-profile-status');
+  status.textContent = 'Importing…';
+  try {
+    const r = await fetch(API + '/api/browser/profiles/' + encodeURIComponent(name) + '/import', {
+      method: 'POST', body: file, headers: { 'Content-Type': 'application/zip', 'Content-Length': file.size }
+    });
+    const d = await r.json();
+    status.textContent = d.ok ? 'Imported.' : ('Error: ' + d.error);
+    setTimeout(() => { status.textContent = ''; }, 3000);
+    await _rbLoadProfiles();
+  } catch(e) { status.textContent = 'Import failed'; }
+  input.value = '';
 }
 
 async function _rbSwitchProfile(name) {
@@ -17499,6 +17541,65 @@ class CCHandler(BaseHTTPRequestHandler):
                 import shutil
                 shutil.rmtree(str(profile_dir), ignore_errors=True)
             return self._json({"ok": True})
+
+        # GET /api/browser/profiles/<name>/export — download profile as zip
+        export_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)/export$", path)
+        if method == "GET" and export_m:
+            import shutil, tempfile, zipfile
+            name = export_m.group(1)
+            if name == "default":
+                profile_dir = CC_HOME / "playwright-auth" / "profile"
+            else:
+                profile_dir = _RB_PROFILES_DIR / name
+            if not profile_dir.exists():
+                return self._json({"error": "profile not found"}, 404)
+            # Zip only the key state files (cookies, storage, etc.) — skip cache/gpu dirs
+            keep_dirs = {"Default"}
+            skip_names = {"Cache", "Code Cache", "GPUCache", "ShaderCache",
+                          "GrShaderCache", "GraphiteDawnCache", "BrowserMetrics-spare.pma",
+                          "Crashpad", "CrashpadMetrics-active.pma"}
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+                tmp_zip = tf.name
+            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in profile_dir.rglob("*"):
+                    if item.is_file():
+                        parts = item.relative_to(profile_dir).parts
+                        if parts and parts[0] in skip_names: continue
+                        if len(parts) > 1 and parts[1] in skip_names: continue
+                        zf.write(item, item.relative_to(profile_dir))
+            data = open(tmp_zip, "rb").read()
+            os.unlink(tmp_zip)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}-profile.zip"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
+        # POST /api/browser/profiles/<name>/import — restore profile from zip upload
+        import_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)/import$", path)
+        if method == "POST" and import_m:
+            import shutil, tempfile, zipfile
+            name = import_m.group(1)
+            if name == "default":
+                profile_dir = CC_HOME / "playwright-auth" / "profile"
+            else:
+                profile_dir = _RB_PROFILES_DIR / name
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+                tf.write(raw)
+                tmp_zip = tf.name
+            try:
+                with zipfile.ZipFile(tmp_zip) as zf:
+                    zf.extractall(str(profile_dir))
+            except Exception as e:
+                return self._json({"error": f"bad zip: {e}"}, 400)
+            finally:
+                os.unlink(tmp_zip)
+            return self._json({"ok": True, "name": name})
 
         if method == "POST" and path == "/api/browser/navigate":
             body = self._read_body()
