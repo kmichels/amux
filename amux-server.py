@@ -4645,12 +4645,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .file-video-player { max-width:100%;max-height:calc(100% - 36px);outline:none;display:block; }
   .file-video-meta { width:100%;box-sizing:border-box;padding:6px 14px;display:flex;align-items:center;gap:12px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:0.72rem;color:var(--dim);flex-shrink:0;background:rgba(0,0,0,0.7); }
   .file-overlay-body.file-pdf { padding:0;background:var(--bg);white-space:normal; }
-  .file-overlay-body.file-csv { white-space:normal;overflow:auto; }
-  .csv-wrap { overflow:auto; }
+  .file-overlay-body.file-csv { white-space:normal;overflow:hidden;display:flex;flex-direction:column;padding:0; }
+  .csv-toolbar { display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap; }
+  .csv-meta { font-size:0.75rem;color:var(--dim);flex:1;min-width:0; }
+  .csv-search { flex:0 0 auto;padding:3px 8px;background:var(--input,var(--card));border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.78rem;width:160px;outline:none; }
+  .csv-search:focus { border-color:var(--accent); }
+  .csv-truncated { font-size:0.73rem;color:var(--yellow,#fbbf24);margin-left:4px; }
+  .csv-wrap { overflow:auto;flex:1;min-height:0; }
   .csv-table { border-collapse:collapse;font-size:0.78rem;width:max-content;min-width:100%; }
-  .csv-table th,.csv-table td { border:1px solid var(--border);padding:4px 10px;text-align:left;white-space:nowrap; }
-  .csv-table th { background:var(--card);font-weight:600;position:sticky;top:0;z-index:1; }
+  .csv-table th,.csv-table td { border:1px solid var(--border);padding:4px 10px;text-align:left;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis; }
+  .csv-table th { background:var(--card);font-weight:600;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none; }
+  .csv-table th:hover { background:var(--hover,rgba(255,255,255,0.06)); }
+  .csv-table th.sort-asc::after { content:' ▲';font-size:0.65rem;opacity:0.7; }
+  .csv-table th.sort-desc::after { content:' ▼';font-size:0.65rem;opacity:0.7; }
   .csv-table tr:nth-child(even) td { background:rgba(255,255,255,0.02); }
+  .csv-row-hidden { display:none; }
   /* Unified markdown content styling — used everywhere renderMarkdown() output appears */
   .md-content { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 0.88rem; line-height: 1.6; }
   .md-content > *:first-child { margin-top: 0 !important; }
@@ -10366,24 +10375,94 @@ function clearPeekSearch() {
 }
 
 // ── File preview ──
+function _csvParseLine(line, delim) {
+  const cells = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i+1] === '"') { cur += '"'; i++; } // escaped ""
+        else { inQ = false; }
+      } else { cur += ch; }
+    } else {
+      if (ch === '"') { inQ = true; }
+      else if (ch === delim) { cells.push(cur); cur = ''; }
+      else { cur += ch; }
+    }
+  }
+  cells.push(cur);
+  return cells;
+}
+function _csvEsc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+let _csvRows = [], _csvSort = { col: -1, asc: true };
+
 function renderCsvTable(csv) {
   const lines = csv.split('\n').filter(l => l.trim());
   if (!lines.length) return '<em style="color:var(--dim)">Empty file</em>';
-  const parseLine = line => {
-    const cells = []; let cur = '', inQ = false;
-    for (const ch of line) {
-      if (ch === '"') { inQ = !inQ; }
-      else if (ch === ',' && !inQ) { cells.push(cur); cur = ''; }
-      else { cur += ch; }
-    }
-    cells.push(cur);
-    return cells.map(c => c.trim().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
-  };
-  const header = parseLine(lines[0]);
-  const rows = lines.slice(1).map(parseLine);
-  const thead = '<tr>' + header.map(h => `<th>${h}</th>`).join('') + '</tr>';
-  const tbody = rows.map(r => '<tr>' + r.map(c => `<td>${c}</td>`).join('') + '</tr>').join('');
-  return `<div class="csv-wrap"><table class="csv-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+  // Auto-detect delimiter: tab wins if it appears more than comma in first line
+  const delim = (lines[0].split('\t').length > lines[0].split(',').length) ? '\t' : ',';
+  const header = _csvParseLine(lines[0], delim);
+  const allRows = lines.slice(1).map(l => _csvParseLine(l, delim));
+  const MAX_ROWS = 2000;
+  const truncated = allRows.length > MAX_ROWS;
+  _csvRows = truncated ? allRows.slice(0, MAX_ROWS) : allRows;
+  _csvSort = { col: -1, asc: true };
+
+  const metaText = `${_csvRows.length.toLocaleString()}${truncated ? '+' : ''} rows × ${header.length} cols` +
+    (delim === '\t' ? ' · TSV' : '');
+  const truncNote = truncated ? `<span class="csv-truncated">⚠ showing first ${MAX_ROWS.toLocaleString()} of ${allRows.length.toLocaleString()} rows</span>` : '';
+  const thead = '<tr>' + header.map((h,i) =>
+    `<th onclick="_csvSortBy(${i})" title="${_csvEsc(h)}">${_csvEsc(h) || '<span style="opacity:.4">#'+i+'</span>'}</th>`
+  ).join('') + '</tr>';
+  const tbody = _csvRows.map((r,ri) =>
+    `<tr data-ri="${ri}">` + header.map((_,ci) => `<td title="${_csvEsc(r[ci]??'')}">${_csvEsc(r[ci]??'')}</td>`).join('') + '</tr>'
+  ).join('');
+
+  return `<div class="csv-toolbar">
+    <span class="csv-meta">${metaText}${truncNote}</span>
+    <input class="csv-search" placeholder="Filter rows…" oninput="_csvFilter(this.value)" type="search">
+  </div>
+  <div class="csv-wrap"><table class="csv-table" id="csv-tbl"><thead>${thead}</thead><tbody id="csv-body">${tbody}</tbody></table></div>`;
+}
+
+function _csvSortBy(col) {
+  const asc = _csvSort.col === col ? !_csvSort.asc : true;
+  _csvSort = { col, asc };
+  const sorted = [..._csvRows].sort((a,b) => {
+    const av = a[col]??'', bv = b[col]??'';
+    const an = parseFloat(av), bn = parseFloat(bv);
+    const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : av.localeCompare(bv);
+    return asc ? cmp : -cmp;
+  });
+  const tbody = document.getElementById('csv-body');
+  if (!tbody) return;
+  tbody.innerHTML = sorted.map((r,ri) =>
+    `<tr data-ri="${ri}">` + r.map(c => `<td title="${_csvEsc(c??'')}">${_csvEsc(c??'')}</td>`).join('') + '</tr>'
+  ).join('');
+  // Update sort indicators
+  document.querySelectorAll('#csv-tbl th').forEach((th,i) => {
+    th.classList.toggle('sort-asc', i === col && asc);
+    th.classList.toggle('sort-desc', i === col && !asc);
+  });
+  // Re-apply filter
+  const q = document.querySelector('.csv-search');
+  if (q && q.value) _csvFilter(q.value);
+}
+
+function _csvFilter(q) {
+  const lower = q.toLowerCase();
+  let vis = 0;
+  document.querySelectorAll('#csv-body tr').forEach(tr => {
+    const match = !lower || tr.textContent.toLowerCase().includes(lower);
+    tr.classList.toggle('csv-row-hidden', !match);
+    if (match) vis++;
+  });
+  const meta = document.querySelector('.csv-meta');
+  if (meta) {
+    if (!meta.dataset.base) meta.dataset.base = meta.firstChild.textContent || '';
+    const base = meta.dataset.base;
+    if (meta.firstChild) meta.firstChild.textContent = lower ? `${vis} match${vis!==1?'es':''} · ${base}` : base;
+  }
 }
 
 let _fileData = null;
@@ -17740,11 +17819,12 @@ class CCHandler(BaseHTTPRequestHandler):
                     pass
                 content = p.read_text(errors="replace")
                 # Limit to 200KB for safety
-                if len(content) > 200_000:
-                    content = content[:200_000] + "\n\n... (truncated at 200KB)"
                 is_md = ext in (".md", ".markdown", ".mdx")
-                is_csv = ext == ".csv"
+                is_csv = ext in (".csv", ".tsv")
                 is_html = ext in (".html", ".htm")
+                limit = 5_000_000 if is_csv else 200_000
+                if len(content) > limit:
+                    content = content[:limit] + ("\n... (truncated at 5MB)" if is_csv else "\n\n... (truncated at 200KB)")
                 return self._json({
                     "path": str(p), "content": content,
                     "is_markdown": is_md, "is_csv": is_csv, "is_html": is_html,
