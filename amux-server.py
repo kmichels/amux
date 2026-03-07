@@ -20235,6 +20235,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
+                _log_path(name).unlink(missing_ok=True)
                 return self._json({"ok": True, "message": "deleted"})
             return self._json({"error": "not found"}, 404)
 
