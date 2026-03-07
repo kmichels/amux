@@ -7309,10 +7309,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <button class="btn" id="create-branch-suggest-btn" onclick="_suggestBranch()" title="Ask Claude to suggest branch names" style="flex-shrink:0;font-size:0.9rem;">✨</button>
         </div>
         <div id="create-branch-suggestions" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>
-        <label id="create-worktree-row" style="display:none;align-items:center;gap:6px;cursor:pointer;margin-top:8px;font-size:0.82rem;color:var(--dim);">
-          <input type="checkbox" id="create-worktree-enabled" style="width:auto;margin:0;">
-          Use git worktree <span style="color:var(--dim);font-size:0.78rem;">(isolated working copy at ~/.amux/worktrees/&lt;name&gt;)</span>
+        <label id="create-worktree-row" style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:10px;font-size:0.82rem;">
+          <input type="checkbox" id="create-worktree-enabled" onchange="_onWorktreeToggle(this.checked)" style="width:auto;margin:0;">
+          <span>Use git worktree</span>
         </label>
+        <div id="create-worktree-path-row" style="display:none;margin-top:6px;padding:6px 9px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:0.75rem;color:var(--dim);font-family:monospace;word-break:break-all;">
+          <span style="color:var(--dim);font-family:sans-serif;font-size:0.72rem;">Worktree path: </span><span id="create-worktree-path-val"></span>
+        </div>
       </div>
     </div>
     <div class="edit-actions">
@@ -12200,6 +12203,8 @@ function openCreate() {
   document.getElementById('create-branch-wrap').style.display = 'none';
   document.getElementById('create-branch-suggestions').style.display = 'none';
   document.getElementById('create-branch-suggestions').innerHTML = '';
+  document.getElementById('create-worktree-enabled').checked = false;
+  document.getElementById('create-worktree-path-row').style.display = 'none';
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   _createBranchEdited = false;
@@ -12308,18 +12313,37 @@ function _createNameChanged(val) {
     document.getElementById('create-branch').value = slug ? 'session/' + slug : '';
   }
 }
+function _computeWorktreePath() {
+  const dir = document.getElementById('create-dir').value.trim().replace(/\/+$/, '');
+  const name = document.getElementById('create-name').value.trim();
+  if (!dir || !name) return '';
+  // Place worktree as sibling: /path/to/parent/<session-name>
+  const parent = dir.includes('/') ? dir.substring(0, dir.lastIndexOf('/')) : dir;
+  return parent + '/' + name;
+}
+function _onWorktreeToggle(on) {
+  const pathRow = document.getElementById('create-worktree-path-row');
+  if (!pathRow) return;
+  if (on) {
+    const p = _computeWorktreePath();
+    document.getElementById('create-worktree-path-val').textContent = p || '(set name and directory first)';
+    pathRow.style.display = '';
+  } else {
+    pathRow.style.display = 'none';
+  }
+}
 function _onBranchInput(val) {
   _createBranchEdited = true;
-  const row = document.getElementById('create-worktree-row');
-  if (row) row.style.display = val.trim() ? 'flex' : 'none';
+  const cb = document.getElementById('create-worktree-enabled');
+  if (cb && cb.checked) _onWorktreeToggle(true); // refresh path
 }
 function _toggleCreateBranch(on) {
   document.getElementById('create-branch-wrap').style.display = on ? '' : 'none';
   if (!on) {
-    const row = document.getElementById('create-worktree-row');
-    if (row) row.style.display = 'none';
     const cb = document.getElementById('create-worktree-enabled');
-    if (cb) cb.checked = false;
+    if (cb) { cb.checked = false; }
+    const pathRow = document.getElementById('create-worktree-path-row');
+    if (pathRow) pathRow.style.display = 'none';
   }
   if (on) {
     // Pre-fill if empty
@@ -12364,7 +12388,9 @@ async function submitCreate() {
   const prompt = typedPrompt || (_selectedTemplate && _selectedTemplate.initial_prompt ? _selectedTemplate.initial_prompt : '');
   const branchEnabled = document.getElementById('create-branch-enabled').checked;
   const branch = branchEnabled ? document.getElementById('create-branch').value.trim() : '';
-  const worktree = branchEnabled && branch && document.getElementById('create-worktree-enabled').checked;
+  const worktreeEnabled = branchEnabled && branch && document.getElementById('create-worktree-enabled').checked;
+  const worktreePath = worktreeEnabled ? _computeWorktreePath() : '';
+  const worktree = worktreeEnabled && worktreePath;
   if (!name) { document.getElementById('create-name').focus({ preventScroll: true }); return; }
   closeCreate();
 
@@ -12394,7 +12420,7 @@ async function submitCreate() {
     if (branch && dir) {
       await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/git', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({branch, create: true, worktree: !!worktree}),
+        body: JSON.stringify({branch, create: true, worktree: !!worktree, worktree_path: worktreePath || ''}),
       }).catch(() => {});
     }
     // Always start the session immediately
@@ -20053,8 +20079,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 if not re.match(r'^[a-zA-Z0-9_./@\-]+$', branch):
                     return self._json({"error": "invalid branch name"}, 400)
                 if use_worktree and create:
-                    # Create a git worktree at ~/.amux/worktrees/<session-name>
-                    wt_dir = str(CC_HOME / "worktrees" / name)
+                    # Use client-supplied path (sibling of project dir) or fall back to ~/.amux/worktrees/<name>
+                    client_path = body.get("worktree_path", "").strip()
+                    wt_dir = client_path if client_path else str(CC_HOME / "worktrees" / name)
                     Path(wt_dir).parent.mkdir(parents=True, exist_ok=True)
                     try:
                         r = subprocess.run(
