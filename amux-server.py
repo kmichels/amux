@@ -9027,6 +9027,7 @@ const ALL_TABS = [
   { id: 'grid',          label: 'Workspace' },
   { id: 'email',         label: 'Email' },
   { id: 'notes',         label: 'Notes' },
+  { id: 'crm',           label: 'People' },
 ];
 
 let hiddenTabs = (function() {
@@ -9034,7 +9035,7 @@ let hiddenTabs = (function() {
     const s = localStorage.getItem('amux_hidden_tabs');
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
-  // Default for new installs: show only sessions, board, files, notes, workspace
+  // Default for new installs: show only sessions, board, files, notes, workspace, crm
   return new Set(['calendar','scheduler','reports','notifications','logs','browser','email']);
 })();
 
