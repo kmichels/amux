@@ -3341,24 +3341,60 @@ def _session_work_dir(name: str) -> str:
     return ""
 
 
-def _git_info(work_dir: str) -> dict:
-    """Return {branch, repo} for a directory. Returns empty strings if not a git repo."""
+def _git_info(work_dir: str, detail: bool = False) -> dict:
+    """Return {branch, repo} for a directory. Returns empty strings if not a git repo.
+    With detail=True, also returns ahead commits, status lines, remote URL."""
     if not work_dir:
         return {"branch": "", "repo": ""}
     try:
         rb = subprocess.run(
             ["git", "-C", work_dir, "branch", "--show-current"],
-            capture_output=True, text=True, timeout=1,
+            capture_output=True, text=True, timeout=2,
         )
         branch = rb.stdout.strip() if rb.returncode == 0 else ""
         repo = ""
         if branch:
             rr = subprocess.run(
                 ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=1,
+                capture_output=True, text=True, timeout=2,
             )
             repo = rr.stdout.strip() if rr.returncode == 0 else ""
-        return {"branch": branch, "repo": repo}
+        result = {"branch": branch, "repo": repo}
+        if not detail or not branch:
+            return result
+        # Commits ahead of default branch (main/master)
+        for base in ("main", "master", "dev", "develop"):
+            ra = subprocess.run(
+                ["git", "-C", work_dir, "log", f"{base}..HEAD", "--oneline", "--no-decorate"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if ra.returncode == 0:
+                result["ahead_base"] = base
+                result["ahead"] = [l for l in ra.stdout.strip().splitlines() if l]
+                break
+        else:
+            result["ahead_base"] = ""
+            result["ahead"] = []
+        # Uncommitted changes
+        rs = subprocess.run(
+            ["git", "-C", work_dir, "status", "--short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        result["status"] = [l for l in rs.stdout.strip().splitlines() if l] if rs.returncode == 0 else []
+        result["dirty"] = bool(result["status"])
+        # Remote origin URL (for PR link construction)
+        rurl = subprocess.run(
+            ["git", "-C", work_dir, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=3,
+        )
+        result["remote_url"] = rurl.stdout.strip() if rurl.returncode == 0 else ""
+        # Unpushed commits (local only)
+        rp = subprocess.run(
+            ["git", "-C", work_dir, "log", "@{u}..HEAD", "--oneline", "--no-decorate"],
+            capture_output=True, text=True, timeout=5,
+        )
+        result["unpushed"] = len([l for l in rp.stdout.strip().splitlines() if l]) if rp.returncode == 0 else 0
+        return result
     except Exception:
         return {"branch": "", "repo": ""}
 
@@ -5360,6 +5396,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
+  .peek-git-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .peek-git-panel.active { display: flex; }
   .peek-memory-textarea { flex: 1; width: 100%; font-size: 0.88rem; line-height: 1.65;
     font-family: "SF Mono","Fira Code",monospace; background: var(--bg);
     border: 1px solid var(--border); border-radius: 8px; color: var(--text);
@@ -7362,6 +7400,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-memory" onclick="setPeekTab('memory')">Memory</button>
+    <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Git</button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -7441,6 +7480,36 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="peek-memory-preview" class="board-detail-preview md-content" style="display:none;flex:1;overflow-y:auto;min-height:0;"></div>
     <textarea id="peek-global-input" class="peek-memory-textarea" style="display:none;"
       placeholder="Global memory — applied to ALL sessions. Add conventions, tools, or preferences shared across all your sessions..."></textarea>
+  </div>
+  <!-- Git panel -->
+  <div id="peek-git-panel" class="peek-git-panel">
+    <div id="peek-git-loading" style="color:var(--dim);font-size:0.85rem;padding:20px 16px;">Loading git info…</div>
+    <div id="peek-git-content" style="display:none;flex-direction:column;gap:0;flex:1;min-height:0;overflow-y:auto;padding:14px 16px;">
+      <!-- Branch + worktree row -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;">
+        <span id="peek-git-branch" style="font-family:monospace;font-size:0.9rem;font-weight:600;"></span>
+        <span id="peek-git-worktree-badge" style="display:none;font-size:0.72rem;background:rgba(99,102,241,0.15);color:#818cf8;border-radius:4px;padding:2px 7px;">worktree</span>
+        <span id="peek-git-dirty-badge" style="display:none;font-size:0.72rem;background:rgba(220,38,38,0.12);color:#f87171;border-radius:4px;padding:2px 7px;">uncommitted changes</span>
+        <span style="flex:1;"></span>
+        <button class="btn" id="peek-git-push-btn" onclick="peekGitPush()" style="font-size:0.78rem;padding:4px 10px;">Push</button>
+        <button class="btn" id="peek-git-pr-btn" onclick="peekGitOpenPR()" style="font-size:0.78rem;padding:4px 10px;" title="Open pull request">PR ↗</button>
+      </div>
+      <!-- Commits ahead -->
+      <div id="peek-git-ahead-section" style="margin-bottom:14px;">
+        <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--dim);margin-bottom:6px;" id="peek-git-ahead-label"></div>
+        <div id="peek-git-ahead-list" style="font-family:monospace;font-size:0.8rem;line-height:1.7;color:var(--text);"></div>
+      </div>
+      <!-- Status (uncommitted) -->
+      <div id="peek-git-status-section" style="display:none;margin-bottom:14px;">
+        <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--dim);margin-bottom:6px;">Uncommitted changes</div>
+        <div id="peek-git-status-list" style="font-family:monospace;font-size:0.8rem;line-height:1.7;color:var(--text);"></div>
+      </div>
+      <!-- Worktree path -->
+      <div id="peek-git-wt-path-section" style="display:none;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:0.75rem;color:var(--dim);">
+        <span style="font-family:sans-serif;font-size:0.7rem;">Worktree: </span><span id="peek-git-wt-path" style="font-family:monospace;"></span>
+      </div>
+      <div id="peek-git-empty" style="display:none;color:var(--dim);font-size:0.85rem;">No git repository found for this session.</div>
+    </div>
   </div>
 </div>
 
@@ -9617,11 +9686,13 @@ async function sendFromInput(name) {
 }
 
 let _peekTab = 'terminal';
+let _peekGitData = null;
 function setPeekTab(tab) {
   _peekTab = tab;
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-memory').classList.toggle('active', tab === 'memory');
+  document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
@@ -9629,6 +9700,124 @@ function setPeekTab(tab) {
   const mem = document.getElementById('peek-memory-panel');
   if (tab === 'memory') { mem.classList.add('active'); loadPeekMemory(); }
   else { mem.classList.remove('active'); }
+  const git = document.getElementById('peek-git-panel');
+  if (tab === 'git') { git.classList.add('active'); loadPeekGit(); }
+  else { git.classList.remove('active'); }
+}
+
+async function loadPeekGit() {
+  if (!peekSession) return;
+  document.getElementById('peek-git-loading').style.display = '';
+  document.getElementById('peek-git-content').style.display = 'none';
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/git?detail=1');
+    const d = await r.json();
+    _peekGitData = d;
+    _renderPeekGit(d);
+  } catch(e) {
+    document.getElementById('peek-git-loading').textContent = 'Failed to load git info.';
+  }
+}
+
+function _renderPeekGit(d) {
+  document.getElementById('peek-git-loading').style.display = 'none';
+  const content = document.getElementById('peek-git-content');
+  content.style.display = 'flex';
+
+  const empty = document.getElementById('peek-git-empty');
+  if (!d.branch) { empty.style.display = ''; return; }
+  empty.style.display = 'none';
+
+  // Branch
+  const icon = d.worktree ? '⬡' : '⎇';
+  document.getElementById('peek-git-branch').textContent = icon + ' ' + d.branch;
+
+  // Badges
+  document.getElementById('peek-git-worktree-badge').style.display = d.worktree ? '' : 'none';
+  document.getElementById('peek-git-dirty-badge').style.display = d.dirty ? '' : 'none';
+
+  // Push/PR buttons
+  const unpushed = d.unpushed || 0;
+  const pushBtn = document.getElementById('peek-git-push-btn');
+  pushBtn.textContent = unpushed ? `Push (${unpushed})` : 'Push';
+  pushBtn.style.display = d.branch ? '' : 'none';
+
+  const prBtn = document.getElementById('peek-git-pr-btn');
+  const prUrl = _buildPRUrl(d.remote_url, d.branch);
+  prBtn.style.display = prUrl ? '' : 'none';
+  prBtn.dataset.url = prUrl;
+
+  // Commits ahead
+  const aheadSection = document.getElementById('peek-git-ahead-section');
+  const ahead = d.ahead || [];
+  if (ahead.length) {
+    document.getElementById('peek-git-ahead-label').textContent =
+      ahead.length + ' commit' + (ahead.length === 1 ? '' : 's') + ' ahead of ' + (d.ahead_base || 'main');
+    document.getElementById('peek-git-ahead-list').innerHTML =
+      ahead.map(l => {
+        const [hash, ...rest] = l.split(' ');
+        return `<div><span style="color:var(--dim);margin-right:8px;">${esc(hash)}</span>${esc(rest.join(' '))}</div>`;
+      }).join('');
+    aheadSection.style.display = '';
+  } else {
+    aheadSection.style.display = 'none';
+  }
+
+  // Uncommitted status
+  const statusSection = document.getElementById('peek-git-status-section');
+  const status = d.status || [];
+  if (status.length) {
+    document.getElementById('peek-git-status-list').innerHTML =
+      status.map(l => {
+        const flag = l.slice(0, 2).trim();
+        const file = esc(l.slice(3));
+        const color = flag === '??' ? 'var(--dim)' : flag.includes('M') ? '#60a5fa' : flag.includes('D') ? '#f87171' : 'var(--text)';
+        return `<div><span style="color:${color};margin-right:10px;">${esc(flag||'?')}</span>${file}</div>`;
+      }).join('');
+    statusSection.style.display = '';
+  } else {
+    statusSection.style.display = 'none';
+  }
+
+  // Worktree path
+  const wtPathSection = document.getElementById('peek-git-wt-path-section');
+  if (d.worktree && peekSessionDir) {
+    document.getElementById('peek-git-wt-path').textContent = peekSessionDir;
+    wtPathSection.style.display = '';
+  } else {
+    wtPathSection.style.display = 'none';
+  }
+}
+
+function _buildPRUrl(remoteUrl, branch) {
+  if (!remoteUrl || !branch) return '';
+  // Convert SSH → HTTPS: git@github.com:org/repo.git → https://github.com/org/repo
+  let base = remoteUrl.trim();
+  if (base.startsWith('git@github.com:')) {
+    base = 'https://github.com/' + base.slice('git@github.com:'.length).replace(/\.git$/, '');
+  } else if (base.startsWith('https://github.com/')) {
+    base = base.replace(/\.git$/, '');
+  } else {
+    return ''; // non-GitHub remote
+  }
+  return base + '/compare/' + encodeURIComponent(branch) + '?expand=1';
+}
+
+async function peekGitPush() {
+  if (!peekSession) return;
+  const btn = document.getElementById('peek-git-push-btn');
+  btn.disabled = true; btn.textContent = 'Pushing…';
+  const branch = _peekGitData && _peekGitData.branch;
+  const text = branch ? `git push -u origin ${branch}` : 'git push';
+  await doSend(peekSession, text);
+  setTimeout(() => loadPeekGit(), 3000);
+  btn.disabled = false;
+}
+
+function peekGitOpenPR() {
+  const btn = document.getElementById('peek-git-pr-btn');
+  const url = btn && btn.dataset.url;
+  if (url) window.open(url, '_blank');
 }
 
 // ── Peek Issues (board issues for this session) ──────────────────────────────
@@ -9778,9 +9967,11 @@ function openPeek(name, opts) {
   peekSession = name;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   // Reset to terminal tab
+  _peekGitData = null;
   if (_peekTab !== 'terminal') setPeekTab('terminal');
   document.getElementById('peek-terminal-panel').style.display = '';
   document.getElementById('peek-memory-panel').classList.remove('active');
+  document.getElementById('peek-git-panel').classList.remove('active');
   // Update dir bar
   document.getElementById('peek-dir-text').textContent = peekSessionDir || '(unknown)';
   const prefillQuery = opts && opts.query ? opts.query : '';
@@ -20022,7 +20213,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json(stats)
             if action == "git":
                 wd = _session_work_dir(name)
-                return self._json(_git_info(wd))
+                detail = qs.get("detail", ["0"])[0] == "1"
+                cfg_g = parse_env_file(env_file)
+                info = _git_info(wd, detail=detail)
+                if detail:
+                    info["worktree"] = cfg_g.get("CC_WORKTREE", "") == "1"
+                return self._json(info)
             if action == "memory":
                 mem_file = _session_mem_file(name)
                 wd = _session_work_dir(name)
