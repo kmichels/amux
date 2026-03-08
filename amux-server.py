@@ -3686,10 +3686,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         return True, "already running"
     cfg = parse_env_file(f)
     work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
-    # Auto-create git branch if dir is a git repo and none exists yet for this session
-    if not cfg.get("CC_BRANCH") and work_dir != str(Path.home()):
-        _auto_create_branch(name, work_dir, f)
-        cfg = parse_env_file(f)  # reload after update
+    # Only create a git branch if explicitly configured (CC_BRANCH set in env)
+    # Default: sessions work on main, no auto-branch creation
     flags = cfg.get("CC_FLAGS", "")
     # Claude Code v2.1.69+ rejects --dangerously-skip-permissions when running as root.
     # Strip it silently — root already has full privileges.
@@ -3767,7 +3765,16 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                 _has_oauth = bool(_j2.loads(_cj.read_text()).get("oauthAccount"))
         except Exception:
             pass
-        for _ekey in ([] if _has_oauth else ["ANTHROPIC_API_KEY"]) + ["OPENAI_API_KEY"]:
+        # If OAuth is present, explicitly blank ANTHROPIC_API_KEY so sessions
+        # don't inherit it from the parent shell (causes auth conflict).
+        # Only forward the key if there's no OAuth (BYO-key / cloud container).
+        if _has_oauth:
+            _env_args += ["-e", "ANTHROPIC_API_KEY="]
+        else:
+            _api_key_val = os.environ.get("ANTHROPIC_API_KEY", "")
+            if _api_key_val:
+                _env_args += ["-e", f"ANTHROPIC_API_KEY={_api_key_val}"]
+        for _ekey in ["OPENAI_API_KEY"]:
             _eVal = os.environ.get(_ekey, "")
             if _eVal:
                 _env_args += ["-e", f"{_ekey}={_eVal}"]
@@ -6491,6 +6498,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* ── CRM / People view ─────────────────────────────────────────────────── */
   #crm-view { height: calc(100vh - 110px); display: flex; flex-direction: row; overflow: hidden; }
+  #crm-view.sidebar-collapsed .crm-sidebar { width: 0; min-width: 0; border-right: none; overflow: hidden; }
+  #crm-view.sidebar-collapsed .crm-expand-btn { display: flex !important; }
+  .crm-expand-btn { background: transparent; border: none; color: var(--dim); cursor: pointer; padding: 4px; border-radius: 4px; display: none; align-items: center; justify-content: center; flex-shrink: 0; }
+  .crm-expand-btn:hover { background: rgba(139,148,158,0.12); color: var(--text); }
   .crm-sidebar {
     width: 240px; min-width: 180px; border-right: 1px solid var(--border);
     display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
@@ -6548,7 +6559,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .crm-fu-badge.overdue { background: rgba(239,68,68,0.15); color: #f87171; }
   /* Detail pane */
-  .crm-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .crm-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; position: relative; }
   .crm-detail-empty {
     flex: 1; display: flex; flex-direction: column; align-items: center;
     justify-content: center; color: var(--dim); gap: 10px;
@@ -6703,6 +6714,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-pin-item:hover .map-pin-edit-btn { opacity: 1; }
   .map-empty { padding: 20px 12px; text-align: center; font-size: 0.8rem; color: var(--dim); line-height: 1.5; }
   .map-open-btn { position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 1001; background: var(--card); border: 1px solid var(--border); border-left: none; color: var(--text); cursor: pointer; padding: 10px 6px; font-size: 0.85rem; border-radius: 0 6px 6px 0; display: none; box-shadow: 2px 0 8px rgba(0,0,0,0.3); }
+  #map-view.sidebar-collapsed .map-open-btn { display: flex; align-items: center; justify-content: center; }
   .map-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-width: 0; }
   #map-container { flex: 1; z-index: 1; background: var(--bg); }
   .map-drop-hint { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.85); color: #fff; padding: 7px 18px; border-radius: 20px; font-size: 0.8rem; z-index: 1002; pointer-events: none; display: none; white-space: nowrap; box-shadow: 0 2px 10px rgba(0,0,0,0.5); }
@@ -6728,6 +6740,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-modal-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
   .map-btn-danger { background: var(--red) !important; color: #fff !important; border-color: transparent !important; }
   .map-btn-danger:hover { opacity: 0.85; }
+  /* Geocoder search */
+  .map-geocoder-wrap { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1003; width: min(420px, calc(100% - 32px)); }
+  .map-geocoder-input-row { display: flex; background: var(--card); border: 1px solid var(--border); border-radius: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.4); overflow: hidden; }
+  .map-geocoder-input { flex: 1; padding: 9px 16px; background: transparent; border: none; color: var(--text); font-size: 0.88rem; outline: none; font-family: inherit; min-width: 0; }
+  .map-geocoder-input::placeholder { color: var(--dim); }
+  .map-geocoder-clear { background: none; border: none; color: var(--dim); cursor: pointer; padding: 0 12px; font-size: 1rem; display: none; }
+  .map-geocoder-clear:hover { color: var(--text); }
+  .map-geocoder-results { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-top: 6px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.5); display: none; }
+  .map-geocoder-result { padding: 9px 14px; cursor: pointer; font-size: 0.83rem; color: var(--text); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; transition: background 0.1s; }
+  .map-geocoder-result:last-child { border-bottom: none; }
+  .map-geocoder-result:hover, .map-geocoder-result.selected { background: rgba(255,255,255,0.06); }
+  .map-geocoder-result-icon { font-size: 0.9rem; flex-shrink: 0; }
+  .map-geocoder-result-text { flex: 1; min-width: 0; }
+  .map-geocoder-result-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .map-geocoder-result-addr { font-size: 0.74rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .map-geocoder-result-save { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 3px 9px; font-size: 0.72rem; cursor: pointer; flex-shrink: 0; white-space: nowrap; font-family: inherit; }
+  .map-geocoder-result-save:hover { opacity: 0.85; }
+  .map-geocoder-loading { padding: 10px 14px; font-size: 0.82rem; color: var(--dim); text-align: center; }
   @media (max-width: 600px) {
     #map-view { height: calc(100dvh - 122px); }
     .map-sidebar { position: absolute; top: 0; left: 0; bottom: 0; z-index: 1000; width: 82vw !important; min-width: 0 !important; box-shadow: 4px 0 24px rgba(0,0,0,0.6); }
@@ -7215,7 +7245,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="crm-sidebar">
     <div class="crm-sidebar-hdr">
       <span style="font-weight:600;font-size:0.85rem;">People</span>
-      <button class="notes-new-btn" onclick="_crmNew()" title="Add contact" style="font-size:1.1rem;width:26px;height:26px;">+</button>
+      <div style="display:flex;gap:4px;align-items:center;">
+        <button class="notes-new-btn" onclick="_crmNew()" title="Add contact"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="notes-toggle-btn" onclick="_crmToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
+      </div>
     </div>
     <div class="crm-search-wrap">
       <input type="search" id="crm-search" placeholder="Search contacts…" oninput="_crmSearch(this.value)" autocomplete="off">
@@ -7232,6 +7265,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <!-- Detail pane -->
   <div class="crm-detail" id="crm-detail">
+    <button class="crm-expand-btn" onclick="_crmToggleSidebar()" title="Show contacts list" style="position:absolute;top:10px;left:10px;z-index:2;"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
     <div class="crm-detail-empty" id="crm-detail-empty">
       <div style="font-size:2.2rem;">&#x1F465;</div>
       <div style="font-size:0.85rem;">Select a contact or add one</div>
@@ -7273,8 +7307,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="map-sidebar-hdr">
       <span class="map-sidebar-hdr-title">&#x1F4CD; My Map</span>
       <div class="map-sidebar-hdr-btns">
-        <button class="btn" style="padding:3px 8px;font-size:0.78rem;" onclick="_mapAddPin()" title="Drop a pin on the map">+ Pin</button>
-        <button class="btn" style="padding:3px 7px;font-size:0.85rem;" onclick="_mapToggleSidebar()" title="Collapse sidebar">&#x25C0;</button>
+        <button class="notes-new-btn" onclick="_mapAddPin()" title="Drop a pin on the map"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="notes-toggle-btn" onclick="_mapToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
       </div>
     </div>
     <div class="map-sidebar-section">
@@ -7289,8 +7323,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="map-pin-list" class="map-pin-list"></div>
   </div>
-  <button class="map-open-btn" id="map-open-btn" onclick="_mapToggleSidebar()" title="Open sidebar">&#x25B6;</button>
+  <button class="map-open-btn" id="map-open-btn" onclick="_mapToggleSidebar()" title="Open sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
   <div class="map-main">
+    <div class="map-geocoder-wrap" id="map-geocoder-wrap">
+      <div class="map-geocoder-input-row">
+        <input class="map-geocoder-input" id="map-geocoder-input" placeholder="&#x1F50D; Search places, addresses&#x2026;" autocomplete="off" oninput="_mapGeoSearch(this.value)" onkeydown="_mapGeoKeydown(event)">
+        <button class="map-geocoder-clear" id="map-geocoder-clear" onclick="_mapGeoClear()" title="Clear">&#x2715;</button>
+      </div>
+      <div class="map-geocoder-results" id="map-geocoder-results"></div>
+    </div>
     <div id="map-container"></div>
     <div class="map-drop-hint" id="map-drop-hint">&#x1F4CD; Click anywhere on the map to place a pin &mdash; Esc to cancel</div>
     <div class="map-toolbar">
@@ -7545,7 +7586,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <label class="field-label">Working directory</label>
       <div class="ac-wrap">
         <input id="create-dir" type="text" placeholder="/path/to/project" autocomplete="off" autocorrect="off"
-          oninput="acFetch(this.value)" onfocus="acFetch(this.value)"
+          oninput="acFetch(this.value);_branchesLoaded=''" onfocus="acFetch(this.value)"
           onpaste="_acSuppressNext=true" onkeydown="acKeydown(event)">
         <div id="ac-list" class="ac-list"></div>
       </div>
@@ -7578,9 +7619,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </label>
       <div id="create-branch-wrap" style="margin-top:8px;">
         <div style="display:flex;gap:6px;align-items:center;">
-          <input id="create-branch" type="text" placeholder="session/my-project" autocomplete="off" autocorrect="off" style="flex:1;" oninput="_onBranchInput(this.value)">
+          <input id="create-branch" type="text" placeholder="session/my-project" autocomplete="off" autocorrect="off" style="flex:1;" oninput="_onBranchInput(this.value);_filterBranches()" onfocus="_loadExistingBranches()">
           <button class="btn" id="create-branch-suggest-btn" onclick="_suggestBranch()" title="Ask Claude to suggest branch names" style="flex-shrink:0;font-size:0.9rem;">✨</button>
         </div>
+        <div id="create-branch-existing" style="display:none;flex-wrap:wrap;gap:5px;margin-top:8px;max-height:120px;overflow-y:auto;"></div>
         <div id="create-branch-suggestions" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>
       </div>
     </div>
@@ -7717,6 +7759,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <span id="peek-git-branch" style="font-family:monospace;font-size:0.88rem;font-weight:600;"></span>
         <span id="peek-git-worktree-badge" style="display:none;font-size:0.7rem;background:rgba(99,102,241,0.15);color:#818cf8;border-radius:4px;padding:2px 7px;">worktree</span>
         <span style="flex:1;"></span>
+        <button class="btn" id="peek-git-filter-btn" onclick="toggleGitFilter()" style="font-size:0.72rem;padding:3px 9px;display:none;" title="Toggle between session files and all changes">Session</button>
         <button class="btn" id="peek-git-pr-btn" onclick="peekGitOpenPR()" style="font-size:0.75rem;padding:3px 9px;" title="Open pull request">PR ↗</button>
       </div>
       <!-- Two-panel body -->
@@ -9927,22 +9970,18 @@ function autoGrow(el) {
 }
 async function gitPush(name, e) {
   if (!name) return;
-  const ok = await showConfirm(`Push ${name} to main?\n\nThis will commit all changes, merge into main, and push.`, 'Push', false);
+  const ok = await showConfirm(`Deploy ${name} to main?\n\nThis will tell Claude to commit and push to main.`, 'Deploy', false);
   if (!ok) return;
-  const btn = e?.target;
-  if (btn) { btn.disabled = true; btn.textContent = 'Pushing...'; }
   try {
     const r = await fetch(`/api/sessions/${encodeURIComponent(name)}/git-push`, {method:'POST'});
     const d = await r.json();
     if (d.ok) {
-      showToast(`${name}: ${d.steps.join(' \u2192 ')}`);
+      showToast(`Deploy instructions sent to ${name}`);
     } else {
-      showToast(`Push failed: ${(d.errors||[]).join(', ')}`);
+      showToast(`Deploy failed: ${d.error || 'unknown error'}`);
     }
   } catch(e) {
-    showToast(`Push error: ${e.message}`);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '\u2B06 Push'; }
+    showToast(`Deploy error: ${e.message}`);
   }
 }
 async function sendFromInput(name) {
@@ -9983,13 +10022,26 @@ function setPeekTab(tab) {
   else { git.classList.remove('active'); }
 }
 
+let _peekTrackedFiles = null; // tracked files for current peek session
+let _peekGitShowAll = false; // toggle: show all vs only session files
+
+function toggleGitFilter() {
+  _peekGitShowAll = !_peekGitShowAll;
+  if (_peekGitData) _renderPeekGit(_peekGitData);
+}
+
 async function loadPeekGit() {
   if (!peekSession) return;
   document.getElementById('peek-git-loading').style.display = '';
   document.getElementById('peek-git-content').style.display = 'none';
   try {
-    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/git?detail=1');
+    const [r, tr] = await Promise.all([
+      fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/git?detail=1'),
+      fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/tracked-files')
+    ]);
     const d = await r.json();
+    const td = await tr.json();
+    _peekTrackedFiles = (td.files && td.files.length) ? new Set(td.files) : null;
     // Merge session branch from sessions list if not in git response
     const sess = sessions.find(s => s.name === peekSession);
     if (sess && sess.branch && !d.session_branch) d.session_branch = sess.branch;
@@ -10034,7 +10086,21 @@ function _renderPeekGit(d) {
     if (!fileMap[file]) fileMap[file] = {file, added: 0, deleted: 0, staged: false, statusFlag: flag};
     else fileMap[file].statusFlag = flag;
   });
-  const files = Object.values(fileMap);
+  let files = Object.values(fileMap);
+
+  // Show/hide filter toggle button
+  const filterBtn = document.getElementById('peek-git-filter-btn');
+  if (_peekTrackedFiles) {
+    filterBtn.style.display = '';
+    filterBtn.textContent = _peekGitShowAll ? 'All' : 'Session';
+  } else {
+    filterBtn.style.display = 'none';
+  }
+
+  // Filter to session's tracked files if available and not showing all
+  if (_peekTrackedFiles && !_peekGitShowAll) {
+    files = files.filter(f => _peekTrackedFiles.has(f.file));
+  }
 
   // LEFT: dir tree panel
   _renderGitTreePanel(files, d.ahead || [], d.ahead_base || 'main');
@@ -12814,10 +12880,13 @@ function openCreate() {
   document.getElementById('create-dir').value = (_filesCwd && _filesCwd !== '/') ? _filesCwd : (window._cloudEmail ? '/root' : '');
   document.getElementById('create-prompt').value = '';
   document.getElementById('create-branch').value = '';
-  document.getElementById('create-branch-enabled').checked = true;
+  document.getElementById('create-branch-enabled').checked = false;
   document.getElementById('create-branch-wrap').style.display = '';
   document.getElementById('create-branch-suggestions').style.display = 'none';
   document.getElementById('create-branch-suggestions').innerHTML = '';
+  document.getElementById('create-branch-existing').style.display = 'none';
+  document.getElementById('create-branch-existing').innerHTML = '';
+  _branchesLoaded = '';
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   _createBranchEdited = false;
@@ -12928,6 +12997,34 @@ function _createNameChanged(val) {
 }
 function _onBranchInput(val) {
   _createBranchEdited = true;
+}
+let _branchesLoaded = '';  // dir for which branches were last loaded
+let _allBranches = [];     // cached branch list for filtering
+async function _loadExistingBranches() {
+  const dir = document.getElementById('create-dir').value.trim();
+  if (!dir) return;
+  if (dir !== _branchesLoaded) {
+    _branchesLoaded = dir;
+    _allBranches = [];
+    try {
+      const r = await fetch(API + '/api/git-branches?' + new URLSearchParams({dir}));
+      const d = await r.json();
+      if (d.branches) _allBranches = d.branches;
+    } catch(e) {}
+  }
+  _filterBranches();
+}
+function _filterBranches() {
+  const el = document.getElementById('create-branch-existing');
+  if (!_allBranches.length) { el.style.display = 'none'; return; }
+  const q = document.getElementById('create-branch').value.trim().toLowerCase();
+  const filtered = q ? _allBranches.filter(b => b.toLowerCase().includes(q)) : _allBranches;
+  if (!filtered.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.innerHTML = '<span style="font-size:0.72rem;color:var(--dim);width:100%;">' + (q ? `Matching branches (${filtered.length}):` : `Existing branches (${_allBranches.length}):`) + '</span>' +
+    filtered.slice(0, 20).map(b =>
+      `<span class="chip" style="cursor:pointer;font-size:0.75rem;" onclick="document.getElementById('create-branch').value='${esc(b)}';_createBranchEdited=true;_filterBranches();">${esc(b)}</span>`
+    ).join('') + (filtered.length > 20 ? `<span style="font-size:0.72rem;color:var(--dim);">+${filtered.length - 20} more</span>` : '');
+  el.style.display = 'flex';
 }
 function _toggleCreateBranch(on) {
   document.getElementById('create-branch-wrap').style.display = on ? '' : 'none';
@@ -13862,7 +13959,7 @@ function switchView(view) {
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
   document.getElementById('tab-crm').classList.toggle('active', view === 'crm');
   document.getElementById('tab-map').classList.toggle('active', view === 'map');
-  if (view === 'crm') { _crmDirty = false; _crmLoad(); } // always refresh on tab switch
+  if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'files') loadFiles(_filesPath);
   else { try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {} }
@@ -14219,21 +14316,149 @@ function _mapToggleSidebar() {
 
 function _mapApplySidebarState() {
   const sidebar = document.getElementById('map-sidebar');
-  const openBtn = document.getElementById('map-open-btn');
+  const view = document.getElementById('map-view');
   if (!sidebar) return;
   if (_mapSettings.sidebarOpen) {
     sidebar.classList.remove('hidden');
     sidebar.style.display = '';
-    if (openBtn) openBtn.style.display = 'none';
+    if (view) view.classList.remove('sidebar-collapsed');
   } else {
     sidebar.classList.add('hidden');
-    if (openBtn) openBtn.style.display = 'block';
-    // On mobile, hide after animation
+    if (view) view.classList.add('sidebar-collapsed');
     setTimeout(function() {
       if (!_mapSettings.sidebarOpen) sidebar.style.display = 'none';
     }, 260);
   }
 }
+
+let _mapGeoTimer = null;
+let _mapGeoResults = [];
+let _mapGeoSelectedIdx = -1;
+
+function _mapGeoSearch(q) {
+  var clear = document.getElementById('map-geocoder-clear');
+  if (clear) clear.style.display = q ? 'block' : 'none';
+  if (_mapGeoTimer) clearTimeout(_mapGeoTimer);
+  var results = document.getElementById('map-geocoder-results');
+  if (!q || q.trim().length < 2) { if (results) results.style.display = 'none'; return; }
+  if (results) { results.style.display = 'block'; results.innerHTML = '<div class="map-geocoder-loading">Searching…</div>'; }
+  _mapGeoTimer = setTimeout(function() { _mapGeoFetch(q.trim()); }, 350);
+}
+
+function _mapGeoFetch(q) {
+  var url = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(q) + '&format=json&limit=6&addressdetails=1';
+  if (_map) {
+    var b = _map.getBounds();
+    url += '&viewbox=' + b.getWest() + ',' + b.getNorth() + ',' + b.getEast() + ',' + b.getSouth() + '&bounded=1';
+  }
+  fetch(url, { headers: { 'Accept-Language': 'en' } })
+    .then(function(r) { return r.json(); })
+    .then(function(data) { _mapGeoResults = data; _mapGeoSelectedIdx = -1; _mapGeoRenderResults(data); })
+    .catch(function() {
+      var results = document.getElementById('map-geocoder-results');
+      if (results) results.innerHTML = '<div class="map-geocoder-loading">Search failed — check connection</div>';
+    });
+}
+
+function _mapGeoTypeIcon(r) {
+  var cat = r.category || '', type = r.type || '';
+  if (cat === 'amenity') return '&#x1F3DB;';
+  if (cat === 'natural') return '&#x1F333;';
+  if (cat === 'highway') return '&#x1F6E3;';
+  if (cat === 'tourism') return '&#x1F3D6;';
+  if (type === 'restaurant' || type === 'cafe' || type === 'bar') return '&#x1F374;';
+  if (type === 'hotel' || type === 'hostel') return '&#x1F3E8;';
+  if (cat === 'shop') return '&#x1F6CD;';
+  return '&#x1F4CD;';
+}
+
+function _mapGeoRenderResults(data) {
+  var results = document.getElementById('map-geocoder-results');
+  if (!results) return;
+  if (!data || data.length === 0) { results.innerHTML = '<div class="map-geocoder-loading">No results found</div>'; return; }
+  results.innerHTML = data.map(function(r, i) {
+    var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
+    return '<div class="map-geocoder-result" onclick="_mapGeoSelect(' + i + ')">' +
+      '<span class="map-geocoder-result-icon">' + _mapGeoTypeIcon(r) + '</span>' +
+      '<div class="map-geocoder-result-text">' +
+        '<div class="map-geocoder-result-name">' + escHtml(name) + '</div>' +
+        '<div class="map-geocoder-result-addr">' + escHtml(r.display_name) + '</div>' +
+      '</div>' +
+      '<button class="map-geocoder-result-save" onclick="event.stopPropagation();_mapGeoSavePin(' + i + ')">+ Pin</button>' +
+    '</div>';
+  }).join('');
+  results.style.display = 'block';
+}
+
+function _mapGeoSelect(idx) {
+  var r = _mapGeoResults[idx];
+  if (!r || !_map) return;
+  var lat = parseFloat(r.lat), lng = parseFloat(r.lon);
+  _map.flyTo([lat, lng], 16, { duration: 1 });
+  if (window._mapGeoTempMarker) window._mapGeoTempMarker.remove();
+  var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
+  window._mapGeoTempMarker = L.marker([lat, lng]).addTo(_map).bindPopup(
+    '<div style="min-width:160px;font-family:inherit;font-size:13px">' +
+    '<strong>' + escHtml(name) + '</strong><br>' +
+    '<span style="font-size:11px;color:#888">' + escHtml(r.display_name) + '</span><br>' +
+    '<button onclick="_mapGeoSavePin(' + idx + ')" style="margin-top:6px;padding:3px 10px;font-size:12px;cursor:pointer;background:var(--accent,#58a6ff);color:#fff;border:none;border-radius:6px;font-family:inherit">+ Save as Pin</button>' +
+    '</div>'
+  ).openPopup();
+  var results = document.getElementById('map-geocoder-results');
+  if (results) results.style.display = 'none';
+}
+
+function _mapGeoSavePin(idx) {
+  var r = _mapGeoResults[idx];
+  if (!r) return;
+  var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
+  if (window._mapGeoTempMarker) window._mapGeoTempMarker.closePopup();
+  _mapOpenPinModal(null, { lat: parseFloat(r.lat), lng: parseFloat(r.lon) });
+  setTimeout(function() {
+    var nameEl = document.getElementById('map-pin-name');
+    if (nameEl && !nameEl.value) nameEl.value = name;
+    var hint = document.getElementById('map-pin-coords-hint');
+    if (hint) hint.textContent = r.display_name;
+  }, 30);
+}
+
+function _mapGeoClear() {
+  var input = document.getElementById('map-geocoder-input');
+  var results = document.getElementById('map-geocoder-results');
+  var clear = document.getElementById('map-geocoder-clear');
+  if (input) input.value = '';
+  if (results) results.style.display = 'none';
+  if (clear) clear.style.display = 'none';
+  if (window._mapGeoTempMarker) { window._mapGeoTempMarker.remove(); window._mapGeoTempMarker = null; }
+  _mapGeoResults = []; _mapGeoSelectedIdx = -1;
+}
+
+function _mapGeoKeydown(e) {
+  var results = document.getElementById('map-geocoder-results');
+  var items = results ? results.querySelectorAll('.map-geocoder-result') : [];
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _mapGeoSelectedIdx = Math.min(_mapGeoSelectedIdx + 1, items.length - 1);
+    items.forEach(function(el, i) { el.classList.toggle('selected', i === _mapGeoSelectedIdx); });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _mapGeoSelectedIdx = Math.max(_mapGeoSelectedIdx - 1, 0);
+    items.forEach(function(el, i) { el.classList.toggle('selected', i === _mapGeoSelectedIdx); });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (_mapGeoSelectedIdx >= 0) _mapGeoSelect(_mapGeoSelectedIdx);
+    else if (_mapGeoResults.length > 0) _mapGeoSelect(0);
+  } else if (e.key === 'Escape') {
+    _mapGeoClear();
+  }
+}
+
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('#map-geocoder-wrap')) {
+    var results = document.getElementById('map-geocoder-results');
+    if (results) results.style.display = 'none';
+  }
+});
 
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && _mapDropMode) _mapExitDropMode();
@@ -17958,7 +18183,18 @@ function _crmFuInfo(fuDate) {
   return { text: (overdue ? '⚠ ' : '→ ') + fuDate, overdue };
 }
 
-async function _crmLoad() {
+async let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
+function _crmToggleSidebar() {
+  _crmSidebarOpen = !_crmSidebarOpen;
+  localStorage.setItem('amux_crm_sidebar', _crmSidebarOpen ? 'open' : 'closed');
+  _crmApplySidebarState();
+}
+function _crmApplySidebarState() {
+  const view = document.getElementById('crm-view');
+  if (view) view.classList.toggle('sidebar-collapsed', !_crmSidebarOpen);
+}
+
+function _crmLoad() {
   const r = await fetch(API + '/api/crm/contacts');
   _crmContacts = await r.json();
   _crmRenderList(_crmContacts);
@@ -20425,6 +20661,23 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "name": cc_name, "message": f"connected {tmux_session} as {cc_name}"})
 
         # POST /api/sessions (create new session)
+        # GET /api/git-branches?dir=... — list branches for a git repo
+        if method == "GET" and path == "/api/git-branches":
+            wd = qs.get("dir", [""])[0]
+            if not wd or not Path(wd).is_dir():
+                return self._json({"branches": []})
+            try:
+                r = subprocess.run(
+                    ["git", "-C", wd, "branch", "--format=%(refname:short)"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                branches = [b.strip() for b in r.stdout.splitlines() if b.strip() and b.strip() != "main"]
+                # Sort: session/* branches first, then alphabetical
+                branches.sort(key=lambda b: (0 if b.startswith("session/") else 1, b))
+                return self._json({"branches": branches})
+            except Exception:
+                return self._json({"branches": []})
+
         if method == "POST" and path == "/api/suggest-branch":
             body = self._read_body()
             sname = body.get("name", "").strip()
@@ -21008,6 +21261,34 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     "mem_size": mem_size,
                     "mem_path": str(_session_mem_file(name)),
                 })
+            if action == "tracked-files":
+                meta = _load_meta(name)
+                tracked = meta.get("tracked_files", [])
+                if method == "GET":
+                    return self._json({"files": tracked})
+                if method == "POST":
+                    body = self._read_body()
+                    files = body.get("files", [])
+                    if isinstance(files, str):
+                        files = [files]
+                    existing = set(tracked)
+                    for fp in files:
+                        if fp and fp not in existing:
+                            tracked.append(fp)
+                            existing.add(fp)
+                    meta["tracked_files"] = tracked
+                    _save_meta(name, meta)
+                    return self._json({"ok": True, "files": tracked})
+                if method == "DELETE":
+                    body = self._read_body()
+                    files = body.get("files", [])
+                    if isinstance(files, str):
+                        files = [files]
+                    remove_set = set(files)
+                    tracked = [f for f in tracked if f not in remove_set]
+                    meta["tracked_files"] = tracked
+                    _save_meta(name, meta)
+                    return self._json({"ok": True, "files": tracked})
             if action == "stats":
                 cfg = parse_env_file(env_file)
                 stats = get_claude_stats(cfg.get("CC_DIR", ""))
@@ -21100,83 +21381,58 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 except Exception as ex:
                     return self._json({"ok": False, "error": str(ex)}, 500)
             if action == "git-push":
-                # Commit all changes, merge session branch into main, push
-                wd = _session_work_dir(name)
-                if not wd:
-                    return self._json({"error": "session has no directory"}, 400)
+                # Send deploy instructions to the Claude session.
+                # Uses per-session tracked files if available, otherwise tells Claude
+                # to figure out which files to stage.
+                if not is_running(name):
+                    return self._json({"error": "session not running — start it first"}, 400)
+                meta_gp = _load_meta(name)
+                tracked = meta_gp.get("tracked_files", [])
                 cfg_gp = parse_env_file(env_file)
                 branch = cfg_gp.get("CC_BRANCH", "")
-                if not branch:
-                    # Try to detect current branch
-                    rb = subprocess.run(["git", "-C", wd, "branch", "--show-current"],
-                                        capture_output=True, text=True, timeout=3)
-                    branch = rb.stdout.strip() if rb.returncode == 0 else ""
-                if not branch or branch == "main":
-                    return self._json({"error": "no session branch to merge (already on main?)"}, 400)
-                steps = []
-                errors = []
-                try:
-                    # 1. Checkout session branch (commits must go here, not main)
-                    r = subprocess.run(["git", "-C", wd, "checkout", branch],
-                                       capture_output=True, text=True, timeout=10)
-                    if r.returncode != 0:
-                        errors.append(f"checkout {branch} failed: {r.stderr.strip()}")
-                        return self._json({"ok": False, "steps": steps, "errors": errors}, 400)
-                    steps.append(f"on {branch}")
-                    # 2. Stage all changes
-                    subprocess.run(["git", "-C", wd, "add", "-A"],
-                                   capture_output=True, text=True, timeout=10)
-                    # 3. Commit if there are staged changes
-                    r = subprocess.run(["git", "-C", wd, "diff", "--cached", "--quiet"],
-                                       capture_output=True, text=True, timeout=5)
-                    if r.returncode != 0:
-                        r = subprocess.run(["git", "-C", wd, "commit", "-m",
-                                            f"session {name}: auto-commit before merge"],
-                                           capture_output=True, text=True, timeout=15)
-                        if r.returncode == 0:
-                            steps.append("committed")
-                        else:
-                            errors.append(f"commit failed: {r.stderr.strip()}")
+                if branch and branch != "none":
+                    # Legacy branch-based flow
+                    if tracked:
+                        files_list = " ".join(f"`{f}`" for f in tracked)
+                        stage_instructions = f"3. Stage ONLY these tracked files: {files_list}\n"
                     else:
-                        steps.append("nothing to commit")
-                    # 4. Checkout main
-                    r = subprocess.run(["git", "-C", wd, "checkout", "main"],
-                                       capture_output=True, text=True, timeout=10)
-                    if r.returncode != 0:
-                        errors.append(f"checkout main failed: {r.stderr.strip()}")
-                        subprocess.run(["git", "-C", wd, "checkout", branch],
-                                       capture_output=True, text=True, timeout=5)
-                        return self._json({"ok": False, "steps": steps, "errors": errors}, 400)
-                    # 5. Pull latest main before merging
-                    subprocess.run(["git", "-C", wd, "pull", "--ff-only", "origin", "main"],
-                                   capture_output=True, text=True, timeout=15)
-                    # 6. Merge session branch into main
-                    r = subprocess.run(["git", "-C", wd, "merge", branch],
-                                       capture_output=True, text=True, timeout=15)
-                    if r.returncode != 0:
-                        errors.append(f"merge failed: {r.stderr.strip()}")
-                        subprocess.run(["git", "-C", wd, "merge", "--abort"],
-                                       capture_output=True, text=True, timeout=5)
-                        subprocess.run(["git", "-C", wd, "checkout", branch],
-                                       capture_output=True, text=True, timeout=5)
-                        return self._json({"ok": False, "steps": steps, "errors": errors}, 400)
-                    steps.append(f"merged {branch}")
-                    # 7. Push main to origin
-                    r = subprocess.run(["git", "-C", wd, "push", "origin", "main"],
-                                       capture_output=True, text=True, timeout=30)
-                    if r.returncode == 0:
-                        steps.append("pushed to origin/main")
+                        stage_instructions = (
+                            "3. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
+                            "Use `git add <specific files>` for each file you modified.\n"
+                        )
+                    msg = (
+                        f"Deploy now. Your branch is `{branch}`. Run these steps:\n"
+                        f"1. `git stash` (if needed to allow checkout)\n"
+                        f"2. `git checkout {branch}` and `git stash pop` (if stashed)\n"
+                        f"{stage_instructions}"
+                        f"4. `git commit` with a good commit message summarizing YOUR changes only\n"
+                        f"5. `git checkout main && git pull --ff-only origin main`\n"
+                        f"6. `git merge {branch}` (resolve conflicts if any)\n"
+                        f"7. `git push origin main`\n"
+                        f"8. `git checkout {branch}` (go back to your branch)\n"
+                        f"Do all steps now. If any step fails, fix it and continue."
+                    )
+                else:
+                    # Main-based flow (default — no branch)
+                    if tracked:
+                        files_list = " ".join(f"`{f}`" for f in tracked)
+                        stage_instructions = f"2. Stage ONLY these tracked files: {files_list}\n"
                     else:
-                        errors.append(f"push failed: {r.stderr.strip()}")
-                    # 8. Go back to session branch for future work
-                    subprocess.run(["git", "-C", wd, "checkout", branch],
-                                   capture_output=True, text=True, timeout=5)
-                    steps.append(f"back on {branch}")
-                except Exception as ex:
-                    errors.append(str(ex))
-                ok_result = len(errors) == 0
-                return self._json({"ok": ok_result, "steps": steps, "errors": errors},
-                                  200 if ok_result else 400)
+                        stage_instructions = (
+                            "2. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
+                            "Use `git add <specific files>` for each file you modified. "
+                            "Review `git diff` and only add files related to your task.\n"
+                        )
+                    msg = (
+                        f"Deploy now. You are on `main`. Run these steps:\n"
+                        f"1. `git pull --ff-only origin main`\n"
+                        f"{stage_instructions}"
+                        f"3. `git commit` with a good commit message summarizing YOUR changes only\n"
+                        f"4. `git push origin main`\n"
+                        f"Do all steps now. If any step fails, fix it and continue."
+                    )
+                send_text(name, msg)
+                return self._json({"ok": True, "message": "deploy instructions sent to session"})
             if action == "start":
                 ok, msg = start_session(name)
                 meta = _load_meta(name)
@@ -21300,17 +21556,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     stop_session(name)
                 # Clean up session branch if one was created
                 cfg_del = parse_env_file(env_file) if env_file.exists() else {}
-                branch = cfg_del.get("CC_BRANCH", "")
-                if branch:
-                    work = cfg_del.get("CC_DIR", "")
-                    if work:
-                        try:
-                            subprocess.run(
-                                ["git", "-C", work, "branch", "-d", branch],
-                                capture_output=True, timeout=5,
-                            )
-                        except Exception:
-                            pass
+                # Branch is intentionally kept — user manages branches via git
                 env_file.unlink(missing_ok=True)
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
