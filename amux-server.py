@@ -779,7 +779,7 @@ def _rb_send(cmd: dict, timeout: float = 20.0) -> dict:
 
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
-_TOKEN_CACHE_TTL = 30
+_TOKEN_CACHE_TTL = 120
 
 def _refresh_token_cache():
     """Rebuild per-directory token counts and last-activity timestamps from Claude JSONL files."""
@@ -2973,8 +2973,7 @@ def list_sessions() -> list:
     env_files = sorted(CC_SESSIONS.glob("*.env"))
     running_names = [f.stem for f in env_files if tmux_name(f.stem) in tmux_info]
     captures = _tmux_capture_batch(running_names, 30) if running_names else {}
-    # Refresh token cache once (not per session)
-    _refresh_token_cache()
+    # Token cache is refreshed by background job (_refresh_token_cache via scheduler)
     # Batch-load "doing" board tasks per session for task_name display
     try:
         _doing_tasks = {
@@ -18566,7 +18565,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 _notes_version += 1
                 return self._json({"ok": True, "path": note_rel})
             if method == "DELETE":
-                global _notes_version
                 if note_path.exists():
                     trash_dir = CC_NOTES / ".trash"
                     trash_dir.mkdir(parents=True, exist_ok=True)
@@ -21283,6 +21281,7 @@ def main():
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
+    schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
