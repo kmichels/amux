@@ -2830,14 +2830,57 @@ def get_daily_token_stats() -> dict:
     }
 
 
+_metrics_cache: dict = {}
+_metrics_cache_lock = threading.Lock()
+_metrics_cache_ts: float = 0.0
+_METRICS_TTL = 8.0  # seconds
+
+
+def _refresh_metrics_cache() -> None:
+    """Build metrics in a background thread and store in cache."""
+    global _metrics_cache, _metrics_cache_ts
+    data = _build_system_metrics()
+    with _metrics_cache_lock:
+        _metrics_cache = data
+        _metrics_cache_ts = time.time()
+
+
 def get_system_metrics() -> dict:
-    """Get system resource metrics and per-session process attribution."""
+    """Return cached metrics (stale-while-revalidate). First call blocks briefly."""
+    global _metrics_cache, _metrics_cache_ts
+    now = time.time()
+    with _metrics_cache_lock:
+        cache_age = now - _metrics_cache_ts
+        cached = dict(_metrics_cache)
+
+    if not cached:
+        # Cold start: build synchronously so we return real data
+        data = _build_system_metrics()
+        with _metrics_cache_lock:
+            _metrics_cache = data
+            _metrics_cache_ts = time.time()
+        return data
+
+    # Trigger background refresh if stale
+    if cache_age > _METRICS_TTL:
+        t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
+        t.start()
+
+    cached["cache_age_seconds"] = round(cache_age, 1)
+    return cached
+
+
+def _build_system_metrics() -> dict:
+    """Build system resource metrics and per-session process attribution."""
     result: dict = {"system": {}, "sessions": []}
 
     # ── System-level metrics ──────────────────────────────────────────────────
     try:
         import psutil as _psutil  # type: ignore
-        cpu_pct = _psutil.cpu_percent(interval=0.25)
+        # Prime CPU counter then wait briefly for an accurate reading
+        _psutil.cpu_percent()
+        time.sleep(0.5)
+        cpu_pct = _psutil.cpu_percent()
         cpu_per = _psutil.cpu_percent(percpu=True)
         mem = _psutil.virtual_memory()
         swap = _psutil.swap_memory()
@@ -2912,22 +2955,24 @@ def get_system_metrics() -> dict:
     except Exception:
         tokens_by_name = {}
 
-    # Collect active session shell PIDs via tmux
+    # Collect active session shell PIDs — one tmux call for all sessions
     shell_pids: dict = {}
-    if CC_SESSIONS.exists():
-        for env_file in sorted(CC_SESSIONS.glob("*.env")):
-            name = env_file.stem
-            try:
-                r = subprocess.run(
-                    ["tmux", "display-message", "-t", name, "-p", "#{pane_pid}"],
-                    capture_output=True, text=True, timeout=2,
-                )
-                if r.returncode == 0 and r.stdout.strip().isdigit():
-                    shell_pids[name] = int(r.stdout.strip())
-            except Exception:
-                pass
+    try:
+        tp = subprocess.run(
+            ["tmux", "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if tp.returncode == 0:
+            for line in tp.stdout.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1].isdigit():
+                    # Only keep first pane per session (shell pid)
+                    shell_pids.setdefault(parts[0], int(parts[1]))
+    except Exception:
+        pass
 
-    # Prime CPU % readings for all active sessions (one sleep covers all)
+    # Collect process trees for active sessions (psutil, no blocking sleep needed
+    # since we already slept 0.5s during cpu_percent sampling above)
     all_procs: dict = {}
     _has_psutil = False
     try:
@@ -2937,17 +2982,9 @@ def get_system_metrics() -> dict:
             try:
                 proc = _psutil.Process(pid)
                 procs = [proc] + proc.children(recursive=True)
-                alive = [p for p in procs if p.is_running()]
-                for p in alive:
-                    try:
-                        p.cpu_percent(interval=None)  # prime
-                    except Exception:
-                        pass
-                all_procs[sname] = alive
+                all_procs[sname] = [p for p in procs if p.is_running()]
             except Exception:
                 pass
-        if all_procs:
-            time.sleep(0.15)  # single sleep for all sessions
     except ImportError:
         pass
 
@@ -18087,13 +18124,20 @@ function _metricsRender() {
   let html = '';
 
   // Header
+  const cacheAge = data.cache_age_seconds;
+  const cacheLabel = cacheAge !== undefined
+    ? `<span style="font-size:0.7rem;color:var(--dim);margin-left:4px;">(${cacheAge}s ago)</span>`
+    : '';
   html += `<div class="metrics-hdr">
     <div class="metrics-hdr-left">
       <span class="metrics-hdr-title">System Metrics</span>
       ${sys.hostname ? `<span class="metrics-hostname">${sys.hostname}</span>` : ''}
       ${sys.uptime_seconds ? `<span class="metrics-uptime">up ${_metricsFormatUptime(sys.uptime_seconds)}</span>` : ''}
     </div>
-    <button class="btn" id="metrics-refresh-btn" onclick="_metricsLoad()" style="font-size:0.8rem;padding:5px 12px;">\u21BB Refresh</button>
+    <div style="display:flex;align-items:center;gap:8px;">
+      ${cacheLabel}
+      <button class="btn" id="metrics-refresh-btn" onclick="_metricsLoad()" style="font-size:0.8rem;padding:5px 12px;">\u21BB Refresh</button>
+    </div>
   </div>`;
 
   if (!sys.psutil) {
@@ -22628,6 +22672,8 @@ def main():
     # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # Warm the metrics cache in background so first UI open is fast
+    threading.Thread(target=_refresh_metrics_cache, daemon=True).start()
 
     try:
         server.serve_forever()
