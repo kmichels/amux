@@ -6639,6 +6639,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-list-item .nli-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .notes-list-item .nli-date { font-size: 0.7rem; color: var(--dim); margin-top: 2px; }
   .notes-list-empty { padding: 16px 12px; color: var(--dim); font-size: 0.8rem; text-align: center; }
+  .notes-folder-hdr {
+    display: flex; align-items: center; gap: 5px; padding: 6px 10px 4px;
+    font-size: 0.72rem; font-weight: 600; color: var(--dim); cursor: pointer;
+    user-select: none; text-transform: uppercase; letter-spacing: 0.05em;
+    transition: color 0.12s;
+  }
+  .notes-folder-hdr:hover { color: var(--text); }
+  .notes-folder-hdr:hover .notes-folder-add { opacity: 1; }
+  .notes-folder-chevron { flex-shrink: 0; transition: transform 0.15s; }
+  .notes-folder-chevron.open { transform: rotate(90deg); }
+  .notes-folder-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .notes-folder-count { font-size: 0.68rem; color: var(--dim); flex-shrink: 0; }
+  .notes-folder-add {
+    background: none; border: none; color: var(--dim); cursor: pointer; padding: 1px 3px;
+    border-radius: 3px; display: flex; align-items: center; opacity: 0; transition: opacity 0.12s;
+    flex-shrink: 0;
+  }
+  .notes-folder-add:hover { color: var(--accent); background: rgba(88,166,255,0.1); }
+  .notes-folder-items .notes-list-item { padding-left: 24px; }
+  .notes-folder-new-wrap { padding: 6px 10px; border-bottom: 1px solid rgba(139,148,158,0.1); }
+  .notes-folder-input {
+    width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--accent);
+    border-radius: 5px; padding: 5px 8px; font-size: 0.8rem; color: var(--text); outline: none;
+  }
   .notes-editor-pane {
     flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative;
   }
@@ -7571,6 +7595,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <span style="font-weight:600;font-size:0.85rem;">Notes</span>
       <div class="notes-sidebar-actions">
         <button class="notes-new-btn" onclick="_notesNew()" title="New note"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="notes-new-btn" onclick="_notesNewFolder()" title="New folder"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg></button>
         <button class="notes-toggle-btn" onclick="_notesToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
       </div>
     </div>
@@ -8091,6 +8116,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickSend('/model')">/model</div>
           <div class="chip" onclick="peekQuickSend('/mcp')">/mcp</div>
           <div class="chip danger" onclick="peekQuickKeys('C-c')">Ctrl+C</div>
+          <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
           <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
           <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
         </div>
@@ -9433,6 +9459,7 @@ function render() {
           <div class="chip" onclick="chipToInput('${s.name}','/model')">/model</div>
           <div class="chip" onclick="chipToInput('${s.name}','/mcp')">/mcp</div>
           <div class="chip danger" onclick="doKeys('${s.name}','C-c')">Ctrl+C</div>
+          <div class="chip" onclick="doKeys('${s.name}','C-o')">Ctrl+O</div>
           <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
           <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
         </div>
@@ -16683,6 +16710,7 @@ function addGridPane(name, x, y, w, h) {
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/model\')">/model</div>' +
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/mcp\')">/mcp</div>' +
         '<div class="chip danger" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl+C</div>' +
+        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-o\')">Ctrl+O</div>' +
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
         '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
       '</div>' +
@@ -18578,24 +18606,85 @@ async function _notesLoad() {
   }
 }
 
+let _notesCurrentNotes = [];
+let _notesFolderCreating = false;
+
+function _notesFolderOpen(name) {
+  try { return JSON.parse(localStorage.getItem('amux_notes_folders') || '{}')[name] !== false; }
+  catch { return true; }
+}
+function _notesFolderToggle(name) {
+  const state = JSON.parse(localStorage.getItem('amux_notes_folders') || '{}');
+  state[name] = !_notesFolderOpen(name);
+  localStorage.setItem('amux_notes_folders', JSON.stringify(state));
+  _notesRenderList(_notesCurrentNotes);
+}
+function _notesFolderSetOpen(name, open) {
+  const state = JSON.parse(localStorage.getItem('amux_notes_folders') || '{}');
+  state[name] = open;
+  localStorage.setItem('amux_notes_folders', JSON.stringify(state));
+}
+function _notesNewFolder() {
+  _notesFolderCreating = true;
+  _notesRenderList(_notesCurrentNotes);
+  setTimeout(() => { document.getElementById('notes-folder-input')?.focus(); }, 30);
+}
+function _notesFolderCancel() {
+  _notesFolderCreating = false;
+  _notesRenderList(_notesCurrentNotes);
+}
+async function _notesFolderConfirm(name) {
+  name = (name || '').trim().replace(/[^a-zA-Z0-9_\-. ]/g, '-').replace(/\s+/g, '-');
+  _notesFolderCreating = false;
+  if (!name) { _notesRenderList(_notesCurrentNotes); return; }
+  _notesFolderSetOpen(name, true);
+  await _notesNew(name);
+}
+function _notesFolderInputKey(e) {
+  if (e.key === 'Enter') { e.preventDefault(); _notesFolderConfirm(e.target.value); }
+  else if (e.key === 'Escape') { e.preventDefault(); _notesFolderCancel(); }
+}
+function _notesItemHtml(n) {
+  const active = _notesActive && _notesActive.path === n.path ? ' active' : '';
+  const pinned = n.pinned ? ' pinned' : '';
+  const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
+  const stem = n.path.replace(/\.md$/, '').split('/').pop();
+  const rawName = n.name || stem;
+  const displayName = /^untitled(-\d+)?$/.test(rawName) ? 'Untitled' : rawName;
+  return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}" onclick="_notesOpen(this.dataset.path)">
+    <div class="nli-title">${esc(displayName)}</div>
+    <div class="nli-date">${dt}</div>
+  </div>`;
+}
 function _notesRenderList(notes) {
+  _notesCurrentNotes = notes;
   const el = document.getElementById('notes-list');
-  if (!notes.length) {
-    el.innerHTML = '<div class="notes-list-empty">No notes yet</div>';
-    return;
+  // Group by first path component
+  const folders = {}, root = [];
+  for (const n of notes) {
+    const parts = n.path.split('/');
+    if (parts.length > 1) { (folders[parts[0]] = folders[parts[0]] || []).push(n); }
+    else root.push(n);
   }
-  el.innerHTML = notes.map(n => {
-    const active = _notesActive && _notesActive.path === n.path ? ' active' : '';
-    const pinned = n.pinned ? ' pinned' : '';
-    const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
-    const stem = n.path.replace(/\.md$/, '').split('/').pop();
-    const rawName = n.name || stem;
-    const displayName = /^note-\d+$/.test(rawName) ? 'Untitled' : rawName;
-    return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}" onclick="_notesOpen(this.dataset.path)">
-      <div class="nli-title">${esc(displayName)}</div>
-      <div class="nli-date">${dt}</div>
+  let html = '';
+  if (_notesFolderCreating) {
+    html += `<div class="notes-folder-new-wrap"><input id="notes-folder-input" class="notes-folder-input" type="text" placeholder="Folder name…" onkeydown="_notesFolderInputKey(event)" onblur="setTimeout(_notesFolderCancel,150)" autocomplete="off"></div>`;
+  }
+  for (const [folder, items] of Object.entries(folders).sort()) {
+    const open = _notesFolderOpen(folder);
+    html += `<div class="notes-folder-section">
+      <div class="notes-folder-hdr" onclick="_notesFolderToggle('${esc(folder)}')">
+        <svg class="notes-folder-chevron${open?' open':''}" width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M3 2l4 3-4 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 3h3.5l1.5 1.5H11v5.5H1V3Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+        <span class="notes-folder-name">${esc(folder)}</span>
+        <span class="notes-folder-count">${items.length}</span>
+        <button class="notes-folder-add" onclick="event.stopPropagation();_notesNew('${esc(folder)}')" title="New note in ${esc(folder)}"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>
+      </div>
+      ${open ? `<div class="notes-folder-items">${items.map(_notesItemHtml).join('')}</div>` : ''}
     </div>`;
-  }).join('');
+  }
+  html += root.map(_notesItemHtml).join('');
+  el.innerHTML = html || (!_notesFolderCreating ? '<div class="notes-list-empty">No notes yet</div>' : '');
 }
 
 function _notesSidebarUpdateActive(path) {
@@ -18644,7 +18733,7 @@ async function _notesOpen(path) {
 
   let r;
   try {
-    r = await fetch(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')), { signal });
+    r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
   } catch(e) {
     if (e.name === 'AbortError') return; // superseded by a newer click
     return;
@@ -18697,24 +18786,26 @@ async function _notesOpen(path) {
   }
 }
 
-async function _notesNew() {
+async function _notesNew(folder) {
   // Flush pending save in background before creating (captures path+content synchronously)
   if (_notesSaveTimer) { clearTimeout(_notesSaveTimer); _notesSaveTimer = null; _notesSave(); }
-  // Pick unique "Untitled" / "Untitled 1" / "Untitled 2" filename
+  const prefix = folder ? folder + '/' : '';
+  // Pick unique "untitled" / "untitled-1" / ... filename
   const existing = new Set(_notesAllNotes.map(n => n.path));
-  let filename = 'untitled.md';
+  let filename = prefix + 'untitled.md';
   let displayName = 'Untitled';
   if (existing.has(filename)) {
     let i = 1;
-    while (existing.has(`untitled-${i}.md`)) i++;
-    filename = `untitled-${i}.md`;
+    while (existing.has(`${prefix}untitled-${i}.md`)) i++;
+    filename = `${prefix}untitled-${i}.md`;
     displayName = `Untitled ${i}`;
   }
-  await apiCall(API + '/api/notes/' + filename.replace(/\.md$/, ''), {
+  const urlPath = filename.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  await apiCall(API + '/api/notes/' + urlPath, {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ content: `<h1>${displayName}</h1>` })
   });
-  // Insert at top of list without re-fetching (avoids server re-sort resetting other titles)
+  // Insert at top of list without re-fetching
   _notesAllNotes.unshift({ path: filename, name: displayName, updated: Math.floor(Date.now() / 1000), pinned: false, size: 0 });
   _notesRenderList(_notesAllNotes);
   await _notesOpen(filename);
@@ -18760,7 +18851,7 @@ async function _notesSave() {
   const content = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('notes-save-status');
-  const result = await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), {
+  const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ content })
   });
@@ -18812,7 +18903,7 @@ async function _notesDelete() {
   _notesAllNotes = _notesAllNotes.filter(n => n.path !== _notesActive.path);
   document.querySelector(`#notes-list .notes-list-item[data-path="${_notesActive.path}"]`)?.remove();
   _notesActive = null;
-  await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), { method: 'DELETE' });
+  await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
   _notesTrashLoad();
   if (_notesAllNotes.length > 0) {
     await _notesOpen(_notesAllNotes[0].path);
@@ -18850,7 +18941,7 @@ async function _notesTogglePinActive() {
   await _notesTogglePin(_notesActive.path);
 }
 async function _notesTogglePin(path) {
-  const r = await apiCall(API + '/api/notes/' + encodeURIComponent(path.replace(/\.md$/, '')) + '/pin', { method: 'POST' });
+  const r = await apiCall(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/') + '/pin', { method: 'POST' });
   if (!r) return;
   const d = await r.json();
   const entry = _notesAllNotes.find(n => n.path === path);
