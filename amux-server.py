@@ -14964,7 +14964,26 @@ function _mapGeoSelect(idx) {
   if (results) results.style.display = 'none';
 }
 
+function _mapGeoQuickSave(idx) {
+  // One-click save from search results — no modal
+  var r = _mapGeoResults[idx];
+  if (!r) return;
+  var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
+  var lat = parseFloat(r.lat), lng = parseFloat(r.lon);
+  if (isNaN(lat) || isNaN(lng)) return;
+  var pin = { id: 'pin_'+Date.now(), name: name, desc: r.display_name || '', lat: lat, lng: lng, tags: [], createdAt: Date.now() };
+  _mapPins.push(pin);
+  _mapSave();
+  _mapRenderPins();
+  _mapRenderMarkers();
+  var res = document.getElementById('map-geocoder-results');
+  if (res) res.style.display = 'none';
+  if (_map) _map.flyTo([lat, lng], Math.max(_map.getZoom(), 14), { duration: 0.8 });
+  setTimeout(function() { if (_mapMarkers[pin.id]) _mapMarkers[pin.id].openPopup(); }, 900);
+}
+
 function _mapGeoSavePin(idx) {
+  // Opens edit modal (used from popup "Save as Pin" button)
   var r = _mapGeoResults[idx];
   if (!r) return;
   var name = (r.name && r.name.length > 0) ? r.name : r.display_name.split(',')[0];
