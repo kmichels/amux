@@ -821,26 +821,22 @@ class Handler(BaseHTTPRequestHandler):
             db.commit()
             return self._json({"ok": True})
 
-        # ── Determine target container (own or org member's) ──────────────────
-        cookies = _parse_cookies(self.headers.get("Cookie", ""))
-        org_cookie = cookies.get("amux_org", "")
+        # ── Determine target container ─────────────────────────────────────────
+        # Org members always share the owner's container — no separate workspace.
         target_user_id = user_id
         target_port = port
         target_email = user_email
 
-        if org_cookie and org_cookie != user_id:
-            member_row = db.execute(
-                "SELECT u.port, u.email FROM org_members m JOIN users u ON m.owner_id = u.id "
-                "WHERE m.owner_id=? AND m.member_id=?",
-                (org_cookie, user_id)
-            ).fetchone()
-            if member_row and member_row["port"]:
-                target_user_id = org_cookie
-                target_port = member_row["port"]
-                target_email = member_row["email"] or user_email
-            else:
-                # Invalid/stale org cookie — clear it and use own container
-                org_cookie = ""
+        # Check if this user is a member of someone else's org
+        org_row = db.execute(
+            "SELECT m.owner_id, u.port, u.email FROM org_members m "
+            "JOIN users u ON m.owner_id = u.id WHERE m.member_id=?",
+            (user_id,)
+        ).fetchone()
+        if org_row and org_row["port"]:
+            target_user_id = org_row["owner_id"]
+            target_port = org_row["port"]
+            # Keep the member's own email for X-Amux-User-Email header
 
         # Wake target container if needed
         if not container_healthy(target_user_id):
