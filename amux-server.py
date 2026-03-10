@@ -1764,6 +1764,24 @@ def _init_claude_config():
     if settings_changed:
         settings_file.write_text(_json.dumps(settings, indent=2))
 
+
+def _auto_trust_dir(work_dir: str):
+    """Pre-trust a directory in ~/.claude.json so Claude doesn't show the folder trust dialog."""
+    import json as _json
+    import pathlib as _pathlib
+    claude_json = _pathlib.Path.home() / ".claude.json"
+    try:
+        cfg = _json.loads(claude_json.read_text()) if claude_json.exists() else {}
+    except Exception:
+        cfg = {}
+    projects = cfg.setdefault("projects", {})
+    proj = projects.setdefault(work_dir, {})
+    if not proj.get("hasTrustDialogAccepted"):
+        proj["hasTrustDialogAccepted"] = True
+        proj["hasCompletedProjectOnboarding"] = True
+        claude_json.write_text(_json.dumps(cfg, indent=2))
+
+
     # ── ~/.claude/commands/ — skills as slash commands ────────────────────────
     # Sync all skills from SQLite into ~/.claude/commands/ so they're available
     # as /skill-name slash commands in every Claude session.
@@ -3977,6 +3995,8 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
     # Strip it silently — root already has full privileges.
     if os.getuid() == 0 and "--dangerously-skip-permissions" in flags:
         flags = flags.replace("--dangerously-skip-permissions", "").strip()
+    # Auto-trust the session's work_dir so Claude doesn't show the folder trust dialog
+    _auto_trust_dir(work_dir)
     _ensure_memory(name, work_dir)
 
     # Determine session-specific conversation ID for isolation.
