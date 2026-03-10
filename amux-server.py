@@ -11131,12 +11131,16 @@ function _syncPeekOverlayToVisualViewport() {
   }, {passive: true});
 })();
 
-// Rewrite localhost/127.0.0.1/0.0.0.0 URLs to use the actual server hostname
-// so links work when viewing the dashboard from another device
+// Rewrite localhost/127.0.0.1/0.0.0.0 URLs to use the port proxy
+// so links work when viewing the dashboard from another device or cloud
 function rewriteLocalhostUrls(html) {
-  if (!remoteHostname) return html;
-  return html.replace(/(https?):\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?/g,
-    (match, scheme, host, port) => scheme + '://' + remoteHostname + (port || ''));
+  return html.replace(/(https?):\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)(\/[^\s<>"']*)?/g,
+    (match, scheme, host, port, path) => {
+      const p = port ? port.slice(1) : '';
+      if (!p || p === location.port) return match;  // don't proxy amux's own port
+      const base = location.origin + '/proxy/' + p;
+      return base + (path || '/');
+    });
 }
 
 // ═══════ PEEK MODE ═══════
@@ -20200,6 +20204,38 @@ class CCHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        # ── Port proxy: /proxy/<port>/... → localhost:<port>/... ──────────────
+        if path.startswith("/proxy/"):
+            import urllib.request as _ureq
+            parts = path[len("/proxy/"):].split("/", 1)
+            proxy_port = parts[0]
+            proxy_path = "/" + parts[1] if len(parts) > 1 else "/"
+            if not proxy_port.isdigit():
+                return self._json({"error": "invalid port"}, 400)
+            proxy_url = f"http://127.0.0.1:{proxy_port}{proxy_path}"
+            if qs:
+                proxy_url += "?" + qs
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length else None
+                skip = {"host", "content-length"}
+                fwd = {k: v for k, v in self.headers.items() if k.lower() not in skip}
+                req = _ureq.Request(proxy_url, data=body, method=method, headers=fwd)
+                resp = _ureq.urlopen(req, timeout=30)
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ("transfer-encoding",):
+                        self.send_header(k, v)
+                self.end_headers()
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except Exception as e:
+                return self._json({"error": f"port {proxy_port} not reachable: {e}"}, 502)
             return
 
         # PWA assets
