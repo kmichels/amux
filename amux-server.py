@@ -2895,9 +2895,38 @@ def get_system_metrics() -> dict:
     return cached
 
 
+_server_start_time = time.time()
+_server_request_count = 0
+_server_request_lock = threading.Lock()
+
+
 def _build_system_metrics() -> dict:
     """Build system resource metrics and per-session process attribution."""
     result: dict = {"system": {}, "sessions": []}
+
+    # ── Server internals ───────────────────────────────────────────────────
+    thread_count = threading.active_count()
+    thread_names = {}
+    for t in threading.enumerate():
+        cat = "other"
+        n = t.name or ""
+        if "SSE" in n or "sse" in n:
+            cat = "sse"
+        elif n.startswith("Thread-") or "process_request" in n.lower():
+            cat = "http"
+        elif any(k in n for k in ("scheduler", "snapshot", "yolo", "token", "email", "watch", "cert", "metrics")):
+            cat = "background"
+        elif n == "MainThread":
+            cat = "main"
+        thread_names[cat] = thread_names.get(cat, 0) + 1
+    result["server"] = {
+        "pid": os.getpid(),
+        "uptime_seconds": int(time.time() - _server_start_time),
+        "thread_count": thread_count,
+        "thread_breakdown": thread_names,
+        "request_count": _server_request_count,
+        "python_version": sys.version.split()[0],
+    }
 
     # ── Collect shell PIDs up-front so we can prime CPU before sleeping ───────
     shell_pids: dict = {}
@@ -18447,6 +18476,28 @@ function _metricsRender() {
     html += '</div>';
   }
 
+  // Server internals
+  const srv = data.server || {};
+  if (srv.pid) {
+    html += '<div class="metrics-section-title">Server Internals</div><div class="metrics-cards">';
+    html += `<div class="metrics-card">
+      <div class="metrics-card-title">Threads</div>
+      <div class="metrics-card-value">${srv.thread_count}</div>
+      <div class="metrics-card-sub">${Object.entries(srv.thread_breakdown || {}).map(([k,v]) => k + ': ' + v).join(' · ')}</div>
+    </div>`;
+    html += `<div class="metrics-card">
+      <div class="metrics-card-title">Requests</div>
+      <div class="metrics-card-value">${(srv.request_count || 0).toLocaleString()}</div>
+      <div class="metrics-card-sub">since last restart</div>
+    </div>`;
+    html += `<div class="metrics-card">
+      <div class="metrics-card-title">Server Uptime</div>
+      <div class="metrics-card-value" style="font-size:1.2rem;">${_metricsFormatUptime(srv.uptime_seconds || 0)}</div>
+      <div class="metrics-card-sub">PID ${srv.pid} · Python ${srv.python_version || '?'}</div>
+    </div>`;
+    html += '</div>';
+  }
+
   // Session breakdown table
   html += '<div class="metrics-section-title">Session Breakdown</div>';
   html += '<div class="metrics-table-wrap"><table class="metrics-table"><thead><tr>';
@@ -20010,6 +20061,9 @@ class CCHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length))
 
     def _route(self, method: str):
+        global _server_request_count
+        with _server_request_lock:
+            _server_request_count += 1
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
