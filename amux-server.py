@@ -22069,6 +22069,37 @@ class CCHandler(BaseHTTPRequestHandler):
                 get_db().commit()
                 return self._json({"ok": True})
 
+            # POST /api/email/send — send email via Mail.app
+            if method == "POST" and path == "/api/email/send":
+                body = self._read_body()
+                to = body.get("to", "").strip()
+                subject = body.get("subject", "").strip()
+                message = body.get("body", "").strip()
+                cc = body.get("cc", "").strip()
+                if not to or not subject or not message:
+                    return self._json({"error": "to, subject, and body are required"}, 400)
+                cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
+                subj_safe = subject.replace('"', '\\"')
+                to_safe = to.replace('"', '\\"')
+                body_safe = message.replace('"', '\\"').replace('\n', '\\n')
+                script = f"""
+tell application "Mail"
+    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
+    tell new_msg
+        make new to recipient with properties {{address:"{to_safe}"}}
+        {cc_line}
+    end tell
+    send new_msg
+end tell
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    return self._json({"ok": True, "to": to, "subject": subject})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
             return self._json({"error": "not found"}, 404)
 
         # ── Cloud Waitlist ──
