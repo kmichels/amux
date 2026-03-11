@@ -55,12 +55,14 @@ CC_UPLOADS = CC_HOME / "uploads"
 CC_NOTES = CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_MAP = CC_HOME / "map.json"
+CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
 CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
+CC_TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -1017,6 +1019,83 @@ def load_session_log(session: str) -> str:
     return ""
 
 
+# Tracks last JSONL backup mtime per session to avoid redundant copies
+_last_jsonl_backup: dict[str, float] = {}
+
+
+def _session_work_dir_early(name: str) -> str:
+    """Return CC_DIR for a session (early binding — before _session_work_dir is defined)."""
+    env_file = CC_SESSIONS / f"{name}.env"
+    if not env_file.exists():
+        return ""
+    for line in env_file.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("CC_DIR="):
+            val = line[len("CC_DIR="):].strip()
+            if val:
+                return str(Path(val).expanduser().resolve())
+    return ""
+
+
+def backup_session_jsonl(session: str, reason: str = "manual") -> str | None:
+    """Copy the latest JSONL conversation file for a session to ~/.amux/transcripts/<session>/.
+
+    Returns the backup path on success, None if nothing to back up.
+    Keeps at most 20 backups per session (removes oldest when exceeded).
+    """
+    wd = _session_work_dir_early(session)
+    if not wd:
+        return None
+    resolved = str(Path(wd).expanduser().resolve())
+    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
+    if not project_dir.is_dir():
+        return None
+    jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not jsonl_files:
+        return None
+    src = jsonl_files[0]
+    src_mtime = src.stat().st_mtime
+    # Skip if already backed up this exact version
+    last_mtime = _last_jsonl_backup.get(session, 0)
+    if src_mtime <= last_mtime:
+        return None
+    dest_dir = CC_TRANSCRIPTS / session
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    dest = dest_dir / f"{ts}_{reason}_{src.name}"
+    try:
+        import shutil
+        shutil.copy2(str(src), str(dest))
+        _last_jsonl_backup[session] = src_mtime
+        # Prune oldest if > 20 backups
+        all_backups = sorted(dest_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime)
+        for old in all_backups[:-20]:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        return str(dest)
+    except Exception:
+        return None
+
+
+def list_session_transcripts(session: str) -> list[dict]:
+    """List JSONL backup transcripts for a session, newest first."""
+    dest_dir = CC_TRANSCRIPTS / session
+    if not dest_dir.is_dir():
+        return []
+    files = sorted(dest_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    result = []
+    for f in files:
+        stat = f.stat()
+        result.append({
+            "name": f.name,
+            "size": stat.st_size,
+            "mtime": int(stat.st_mtime),
+        })
+    return result
+
+
 # ── Yolo auto-responder ──────────────────────────────────────────────────────
 # When a session runs with --dangerously-skip-permissions, some Claude Code
 # internal safety prompts still require a keypress. We detect and answer them.
@@ -1210,6 +1289,10 @@ def _snapshot_all_sessions():
                 pct = int(ctx_match.group(1))
                 _ac_row = get_db().execute("SELECT value FROM prefs WHERE key='auto_compact_enabled'").fetchone()
                 _ac_enabled = (_ac_row is None) or (_ac_row[0] != "0")  # default ON
+                # Backup JSONL before compaction (regardless of whether auto-compact fires)
+                if pct < 30 and now - actions.get("last_backup", 0) > 120:
+                    actions["last_backup"] = now
+                    threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
                 if _ac_enabled and pct < 20 and now - actions.get("last_compact", 0) > 300:
                     actions["last_compact"] = now
                     actions["post_compact_continue"] = True  # send continuation when compact finishes
@@ -8206,6 +8289,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
           <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
           <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
+          <div class="chip" onclick="peekDownloadLog()" title="Download terminal log">&#128196; Log</div>
+          <div class="chip" onclick="peekShowTranscripts()" title="Conversation transcript backups">&#128190; Transcripts</div>
           <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
         </div>
         <!-- Attachment chips -->
@@ -11567,6 +11652,54 @@ async function peekQuickKeys(keys) {
   if (!peekSession) return;
   await doKeys(peekSession, keys);
   setTimeout(refreshPeek, 500);
+}
+
+function peekDownloadLog() {
+  if (!peekSession) return;
+  const a = document.createElement('a');
+  a.href = API + '/api/sessions/' + encodeURIComponent(peekSession) + '/log';
+  a.download = peekSession + '.log';
+  a.click();
+}
+
+async function peekShowTranscripts() {
+  if (!peekSession) return;
+  const sess = peekSession;
+  const r = await fetch(API + '/api/sessions/' + encodeURIComponent(sess) + '/transcripts');
+  const data = await r.json();
+  const list = data.transcripts || [];
+  const base = API + '/api/sessions/' + encodeURIComponent(sess);
+  let bodyHtml;
+  if (!list.length) {
+    bodyHtml = '<p style="font-size:0.82rem;color:var(--dim);margin:0 0 16px">No backups yet. Click "Backup Now" to save the current conversation transcript.</p>';
+  } else {
+    bodyHtml = list.map(t => {
+      const kb = (t.size / 1024).toFixed(1);
+      const dt = new Date(t.mtime * 1000).toLocaleString();
+      const url = base + '/transcripts/' + encodeURIComponent(t.name);
+      return \`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-subtle,rgba(128,128,128,.15))">
+        <span style="flex:1;font-size:0.72rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="\${esc(t.name)}">\${esc(t.name)}</span>
+        <span style="font-size:0.7rem;color:var(--dim);flex-shrink:0">\${kb} KB</span>
+        <span style="font-size:0.68rem;color:var(--dim);flex-shrink:0">\${dt}</span>
+        <a href="\${url}" download="\${esc(t.name)}" style="font-size:0.72rem;color:var(--accent);text-decoration:none;flex-shrink:0">&#11015;</a>
+      </div>\`;
+    }).join('');
+  }
+  _modalResolve = null;
+  document.getElementById('modal-msg').innerHTML = \`<div style="text-align:left;min-width:320px;max-width:500px">
+    <div style="font-size:1rem;font-weight:700;margin-bottom:4px">Transcripts — \${esc(sess)}</div>
+    <p style="font-size:0.75rem;color:var(--dim);margin:0 0 12px">JSONL conversation backups (auto-saved before compaction).</p>
+    <div style="max-height:260px;overflow-y:auto">\${bodyHtml}</div>
+  </div>\`;
+  document.getElementById('modal-btns').innerHTML = \`
+    <button class="btn" onclick="(async()=>{
+      const br=await fetch(API+'/api/sessions/'+encodeURIComponent('\${esc(sess)}')+'/transcripts',{method:'POST'});
+      const bd=await br.json();
+      _modalClose(false);
+      setTimeout(()=>peekShowTranscripts(),100);
+    })()">&#128190; Backup Now</button>
+    <button class="btn primary" onclick="_modalClose(false)">Close</button>\`;
+  document.getElementById('modal-backdrop').classList.add('open');
 }
 
 // ── @mention routing ──
@@ -22567,6 +22700,37 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     "mem_size": mem_size,
                     "mem_path": str(_session_mem_file(name)),
                 })
+            if action == "log":
+                # Download raw terminal log file
+                lp = _log_path(name)
+                if not lp.exists():
+                    return self._json({"error": "no log"}, 404)
+                data = lp.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Disposition", f'attachment; filename="{name}.log"')
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            if action == "transcripts":
+                # List available JSONL backups
+                if action_subid:
+                    # Download a specific transcript file
+                    dest_dir = CC_TRANSCRIPTS / name
+                    tf = dest_dir / action_subid
+                    if not tf.exists() or not tf.is_file():
+                        return self._json({"error": "not found"}, 404)
+                    data = tf.read_bytes()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson")
+                    self.send_header("Content-Disposition", f'attachment; filename="{action_subid}"')
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                transcripts = list_session_transcripts(name)
+                return self._json({"transcripts": transcripts})
             if action == "tracked-files":
                 meta = _load_meta(name)
                 tracked = meta.get("tracked_files", [])
@@ -22623,6 +22787,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             return self._json({"ok": True, "files": tracked})
 
         if method == "POST":
+            if action == "transcripts":
+                # Manually trigger a JSONL transcript backup
+                path = backup_session_jsonl(name, "manual")
+                if path:
+                    return self._json({"ok": True, "path": path})
+                return self._json({"ok": False, "message": "nothing to backup"})
             if action == "send":
                 body = self._read_body()
                 text = body.get("text", "")
@@ -22631,6 +22801,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 wd = _session_work_dir(name)
                 if wd:
                     _ensure_memory(name, wd)
+                # Backup JSONL transcript before /compact so we can revert
+                if text.strip().startswith("/compact"):
+                    threading.Thread(target=backup_session_jsonl, args=(name, "pre_compact"), daemon=True).start()
                 ok, msg = send_text(name, text)
                 if ok:
                     _update_meta(name, last_send=int(time.time()), last_send_text=text[:200])
