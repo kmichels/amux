@@ -427,15 +427,22 @@ def _reaper():
         try:
             db = get_db()
             cutoff = int(time.time()) - IDLE_SECONDS
-            # Exempt org members — they inherit their owner's keep-alive
+            # Exempt org members (they use owner's container) and org owners
+            # whose members are still active — member activity keeps the
+            # shared container alive even when the owner hasn't visited.
             org_member_ids = {r["member_id"] for r in
                 db.execute("SELECT member_id FROM org_members").fetchall()}
+            active_owner_ids = {r["owner_id"] for r in
+                db.execute(
+                    "SELECT DISTINCT m.owner_id FROM org_members m "
+                    "JOIN users u ON m.member_id = u.id WHERE u.last_seen >= ?",
+                    (cutoff,)).fetchall()}
             stale = db.execute(
                 "SELECT id FROM users WHERE last_seen < ? AND plan = 'free'",
                 (cutoff,)).fetchall()
             for row in stale:
                 uid = row["id"]
-                if uid in org_member_ids:
+                if uid in org_member_ids or uid in active_owner_ids:
                     continue
                 if container_running(uid):
                     print(f"[reaper] stopping idle container for {uid}")
@@ -978,6 +985,11 @@ class Handler(BaseHTTPRequestHandler):
             target_user_id = org_row["owner_id"]
             target_port = org_row["port"]
             # Keep the member's own email for X-Amux-User-Email header
+            # Also refresh the owner's last_seen so the reaper doesn't kill
+            # the shared container while an org member is actively using it.
+            now = int(time.time())
+            db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, target_user_id))
+            db.commit()
 
         # Wake target container if needed
         if not container_healthy(target_user_id):
