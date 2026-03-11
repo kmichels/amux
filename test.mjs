@@ -160,13 +160,13 @@ async function runDesktop(browser) {
 
   // Expand a card — click the outer .card div which calls toggle() directly
   // (NOT .card-header which uses headerTap double-tap-to-peek logic)
-  await page.$eval('.card', el => el.click());
+  await page.locator('.card').first().click();
   await wait(300);
-  const expanded = await page.$('.card.expanded');
+  const expanded = await page.locator('.card.expanded').first().isVisible().catch(() => false);
   log('Session card expands on click', !!expanded);
 
   // Collapse back
-  await page.$eval('.card.expanded', el => el.click()).catch(() => {});
+  await page.locator('.card.expanded').first().click().catch(() => {});
   await wait(200);
 
   // Ensure no overlay is accidentally open before navigating

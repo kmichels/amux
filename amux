@@ -501,74 +501,6 @@ cmd_start_all() {
   done
 }
 
-cmd_playwright_auth() {
-  local subcmd="${1:-help}"
-  shift || true
-  local profile_dir="$CC_HOME/playwright-auth/profile"
-  local script_dir
-  script_dir="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")")" && pwd)"
-
-  case "$subcmd" in
-    capture)
-      mkdir -p "$profile_dir"
-      echo "${BOLD}Opening browser for auth capture.${RESET}"
-      echo "Log into any sites (GitHub, Google, Notion, etc.), then ${BOLD}close the browser window${RESET}."
-      echo ""
-      # Use a small inline Node script with playwright
-      node - "$profile_dir" <<'JSEOF'
-const profileDir = process.argv[1];
-let pw;
-try { pw = require('playwright'); } catch(e) {
-  console.error('playwright not found. Installing...');
-  require('child_process').execSync('npm install -g playwright && npx playwright install chromium --with-deps', {stdio:'inherit'});
-  pw = require('playwright');
-}
-(async () => {
-  const ctx = await pw.chromium.launchPersistentContext(profileDir, {
-    headless: false,
-    viewport: null,
-    ignoreDefaultArgs: ['--enable-automation'],
-    args: ['--start-maximized', '--no-first-run', '--disable-blink-features=AutomationControlled'],
-  });
-  console.log('\n  Browser ready. Log in to your accounts, then close all browser windows.\n');
-  await ctx.waitForEvent('close', { timeout: 0 });
-  process.exit(0);
-})().catch(e => { console.error(e.message); process.exit(1); });
-JSEOF
-      echo ""
-      echo "${GREEN}✓${RESET} Auth profile saved."
-      # Auto-sync to cloud
-      cmd_playwright_auth sync
-      ;;
-
-    sync)
-      [[ -d "$profile_dir" ]] || die "No auth profile found. Run: amux playwright-auth capture"
-      local tfvars="$script_dir/cloud/terraform.tfvars"
-      [[ -f "$tfvars" ]] || die "No cloud config found at $tfvars"
-      local project_id iap_user
-      project_id=$(grep project_id "$tfvars" | awk -F'"' '{print $2}')
-      iap_user=$(gcloud config get-value account 2>/dev/null | tr '@.' '_')
-      echo "Syncing Playwright auth profile to amux-cloud (${DIM}${project_id}${RESET})..."
-      local tmptar
-      tmptar=$(mktemp /tmp/amux-pw-XXXXXX.tar.gz)
-      tar -czf "$tmptar" -C "$CC_HOME/playwright-auth" profile/
-      gcloud compute scp "$tmptar" "${iap_user}@amux-dev:/tmp/pw-profile.tar.gz" \
-        --zone=us-central1-a --project="$project_id" --tunnel-through-iap --quiet
-      gcloud compute ssh "${iap_user}@amux-dev" \
-        --zone=us-central1-a --project="$project_id" --tunnel-through-iap --quiet \
-        --command="sudo mkdir -p /root/.amux/playwright-auth && sudo tar -xzf /tmp/pw-profile.tar.gz -C /root/.amux/playwright-auth/ && sudo rm /tmp/pw-profile.tar.gz && sudo systemctl restart amux"
-      rm -f "$tmptar"
-      echo "${GREEN}✓${RESET} Playwright auth profile synced to amux-cloud."
-      ;;
-
-    *)
-      echo "Usage: amux playwright-auth <capture|sync>"
-      echo "  ${BOLD}capture${RESET}  Open a browser to log into your accounts (saves profile locally)"
-      echo "  ${BOLD}sync${RESET}     Upload saved profile to cloud VM"
-      ;;
-  esac
-}
-
 cmd_board() {
   local AMUX_API="${AMUX_API:-https://localhost:8822}"
   local subcmd="${1:-help}"; shift 2>/dev/null || true
@@ -683,10 +615,6 @@ ${BOLD}Board:${RESET}
   amux board todo <ID>           Mark issue as todo
   amux board status <ID> <s>     Set any status
 
-${BOLD}Playwright Auth:${RESET}
-  amux playwright-auth capture   Open browser to log into accounts (saves profile)
-  amux playwright-auth sync      Upload auth profile to cloud VM
-
 ${BOLD}Claude Code flags (on register/exec):${RESET}
   --model <model>              Model: opus, sonnet, haiku, or full ID
   --yolo                       Alias for --dangerously-skip-permissions
@@ -737,7 +665,6 @@ case "${1:-}" in
   stop-all)         cmd_stop_all ;;
   serve|web)        shift; cmd_serve "$@" ;;
   board|b)           shift; cmd_board "$@" ;;
-  playwright-auth|pw-auth) shift; cmd_playwright_auth "$@" ;;
   help|--help|-h)   cmd_help ;;
   version|--version|-v) echo "amux v${CC_VERSION}" ;;
   "")               cmd_dashboard ;;

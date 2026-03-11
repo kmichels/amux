@@ -4003,25 +4003,22 @@ _GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/userinfo.email",
 ]
-_GMAIL_DEFAULT_CLIENT = {
-    "installed": {
-        "client_id": "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com",
-        "client_secret": "d-FL95Q19q7MQmFpd7hHD0Ty",
-        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-    }
-}
+_GMAIL_DEFAULT_CLIENT = None  # Must supply ~/.amux/gmail-oauth-client.json
 
-def _gmail_client_config() -> dict:
-    """Load custom OAuth client config or fall back to default."""
+# Pending OAuth flows: state → (account, flow)
+_gmail_pending: dict = {}
+
+_GMAIL_REDIRECT_URI = "http://localhost:8822/api/gmail/callback"
+
+def _gmail_client_config() -> dict | None:
+    """Load OAuth client config from ~/.amux/gmail-oauth-client.json."""
     custom = CC_HOME / "gmail-oauth-client.json"
     if custom.exists():
         try:
             return json.loads(custom.read_text())
         except Exception:
             pass
-    return _GMAIL_DEFAULT_CLIENT
+    return None
 
 
 def _gmail_token_path(account: str) -> Path:
@@ -4075,41 +4072,22 @@ def _gmail_service(account: str):
         return None
 
 
-def _gmail_auth_url(account: str) -> str:
-    """Generate OAuth authorization URL (OOB flow — user pastes code back)."""
-    from google_auth_oauthlib.flow import Flow
-    flow = Flow.from_client_config(
-        _gmail_client_config(), _GMAIL_SCOPES,
-        redirect_uri="urn:ietf:wg:oauth:2.0:oob"
-    )
-    url, _ = flow.authorization_url(
-        access_type="offline", prompt="consent",
-        login_hint=account, include_granted_scopes="true"
-    )
-    return url
-
-
-def _gmail_exchange_code(account: str, code: str) -> tuple[bool, str]:
-    """Exchange authorization code for tokens; save to disk."""
+def _gmail_auth_url(account: str) -> tuple[str, str] | tuple[None, str]:
+    """Generate OAuth authorization URL (localhost callback). Returns (url, state) or (None, error)."""
+    cfg = _gmail_client_config()
+    if not cfg:
+        return None, "Gmail OAuth client not configured. Save credentials to ~/.amux/gmail-oauth-client.json"
     try:
         from google_auth_oauthlib.flow import Flow
-        flow = Flow.from_client_config(
-            _gmail_client_config(), _GMAIL_SCOPES,
-            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+        flow = Flow.from_client_config(cfg, _GMAIL_SCOPES, redirect_uri=_GMAIL_REDIRECT_URI)
+        url, state = flow.authorization_url(
+            access_type="offline", prompt="consent",
+            login_hint=account, include_granted_scopes="true"
         )
-        flow.fetch_token(code=code.strip())
-        creds = flow.credentials
-        _gmail_token_path(account).write_text(json.dumps({
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-        }))
-        return True, ""
+        _gmail_pending[state] = (account, flow)
+        return url, state
     except Exception as e:
-        slog(f"[gmail] exchange_code {account}: {e}")
-        return False, str(e)
+        return None, str(e)
 
 
 def _gmail_connected_accounts() -> list:
@@ -21396,18 +21374,46 @@ class CCHandler(BaseHTTPRequestHandler):
                 account = qs.get("account", [""])[0].strip()
                 if not account:
                     return self._json({"error": "account required"}, 400)
-                url = _gmail_auth_url(account)
+                url, state_or_err = _gmail_auth_url(account)
+                if url is None:
+                    return self._json({"error": state_or_err}, 500)
                 return self._json({"url": url, "account": account})
 
-            # POST /api/gmail/connect  {account, code}  → exchange code → store token
+            # GET /api/gmail/callback?code=&state=  → OAuth callback (localhost redirect)
+            if path == "/api/gmail/callback" and method == "GET":
+                code  = qs.get("code",  [""])[0].strip()
+                state = qs.get("state", [""])[0].strip()
+                error = qs.get("error", [""])[0].strip()
+                if error:
+                    html = f"<html><body><h2>Auth failed: {error}</h2><p>Close this tab.</p></body></html>"
+                    self.send_response(400); self.send_header("Content-Type","text/html"); self.end_headers()
+                    self.wfile.write(html.encode()); return
+                entry = _gmail_pending.pop(state, None)
+                if not entry or not code:
+                    html = "<html><body><h2>Invalid or expired auth request.</h2><p>Close this tab and try again.</p></body></html>"
+                    self.send_response(400); self.send_header("Content-Type","text/html"); self.end_headers()
+                    self.wfile.write(html.encode()); return
+                account, flow = entry
+                try:
+                    flow.fetch_token(code=code)
+                    creds = flow.credentials
+                    CC_GMAIL.mkdir(parents=True, exist_ok=True)
+                    _gmail_token_path(account).write_text(json.dumps({
+                        "token": creds.token, "refresh_token": creds.refresh_token,
+                        "token_uri": creds.token_uri, "client_id": creds.client_id,
+                        "client_secret": creds.client_secret,
+                    }))
+                    html = f"<html><body><h2>✓ {account} connected!</h2><p>You can close this tab.</p></body></html>"
+                    self.send_response(200); self.send_header("Content-Type","text/html"); self.end_headers()
+                    self.wfile.write(html.encode()); return
+                except Exception as e:
+                    html = f"<html><body><h2>Token exchange failed</h2><pre>{e}</pre></body></html>"
+                    self.send_response(500); self.send_header("Content-Type","text/html"); self.end_headers()
+                    self.wfile.write(html.encode()); return
+
+            # POST /api/gmail/connect  {account, code}  → manual code exchange (legacy)
             if path == "/api/gmail/connect" and method == "POST":
-                body = self._read_body()
-                account = body.get("account", "").strip()
-                code = body.get("code", "").strip()
-                if not account or not code:
-                    return self._json({"error": "account and code required"}, 400)
-                ok, err = _gmail_exchange_code(account, code)
-                return self._json({"ok": ok, "error": err})
+                return self._json({"error": "Use the /api/gmail/auth URL flow — open the URL in a browser, it will redirect back automatically."}, 410)
 
             # DELETE /api/gmail/account?account=  → disconnect / remove token
             if path == "/api/gmail/account" and method == "DELETE":
