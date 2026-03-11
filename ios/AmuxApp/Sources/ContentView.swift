@@ -10,53 +10,29 @@ struct ContentView: View {
     @State private var webViewRef: WKWebView?
 
     var body: some View {
-        NavigationStack {
-            ZStack(alignment: .top) {
-                if let url = serverManager.serverURL {
-                    WebView(
-                        url: url,
-                        isLoading: $isLoading,
-                        canGoBack: $canGoBack,
-                        canGoForward: $canGoForward,
-                        onNavigationAction: handleNavigation
-                    )
-                    .ignoresSafeArea(edges: .bottom)
-                }
-
-                if isLoading {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: .infinity)
-                        .tint(Color.accentColor)
-                }
+        ZStack(alignment: .top) {
+            if let url = serverManager.serverURL {
+                WebView(
+                    url: url,
+                    isLoading: $isLoading,
+                    canGoBack: $canGoBack,
+                    canGoForward: $canGoForward,
+                    onNavigationAction: handleNavigation
+                )
+                .ignoresSafeArea()
             }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .navigationBarLeading) {
-                    Button(action: { webViewRef?.goBack() }) {
-                        Image(systemName: "chevron.left")
-                    }
-                    .disabled(!canGoBack)
 
-                    Button(action: { webViewRef?.goForward() }) {
-                        Image(systemName: "chevron.right")
-                    }
-                    .disabled(!canGoForward)
-                }
-
-                ToolbarItem(placement: .principal) {
-                    Text(serverManager.serverURL?.host ?? "amux")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showSettings = true }) {
-                        Image(systemName: "gear")
-                    }
-                }
+            if isLoading {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: .infinity)
+                    .tint(Color.accentColor)
             }
         }
+        .gesture(
+            LongPressGesture(minimumDuration: 0.5)
+                .onEnded { _ in showSettings = true }
+        )
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(serverManager)
