@@ -27,7 +27,7 @@ struct ContentView: View {
                     ProgressView()
                         .progressViewStyle(.linear)
                         .frame(maxWidth: .infinity)
-                        .tint(.accentColor)
+                        .tint(Color.accentColor)
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -47,7 +47,7 @@ struct ContentView: View {
                 ToolbarItem(placement: .principal) {
                     Text(serverManager.serverURL?.host ?? "amux")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundColor(.secondary)
                 }
 
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -64,7 +64,6 @@ struct ContentView: View {
     }
 
     private func handleNavigation(_ action: WKNavigationAction) -> WKNavigationActionPolicy {
-        // Open external links in Safari
         guard let url = action.request.url,
               let serverHost = serverManager.serverURL?.host else {
             return .allow
@@ -83,60 +82,76 @@ struct SettingsView: View {
     @EnvironmentObject var serverManager: ServerManager
     @Environment(\.dismiss) var dismiss
     @State private var showAddServer = false
-    @State private var newName = ""
-    @State private var newURL = ""
     @State private var addError = false
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Servers") {
-                    ForEach(serverManager.savedServers) { server in
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(server.name).font(.headline)
-                                Text(server.url).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if serverManager.serverURL?.absoluteString == server.url {
-                                Image(systemName: "checkmark").foregroundStyle(.accentColor)
-                            }
+            settingsList
+                .navigationTitle("Settings")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+                .sheet(isPresented: $showAddServer) {
+                    AddServerView(onAdd: { name, url in
+                        if serverManager.addServer(name: name, urlString: url) {
+                            showAddServer = false
+                        } else {
+                            addError = true
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            serverManager.selectServer(server.url)
-                            dismiss()
-                        }
-                    }
-                    .onDelete(perform: serverManager.removeServer)
+                    })
                 }
+        }
+    }
 
-                Section {
-                    Button("Add Server") { showAddServer = true }
-                }
+    private var settingsList: some View {
+        List {
+            serversSection
+            addSection
+            resetSection
+        }
+    }
 
-                Section {
-                    Button("Back to Setup", role: .destructive) {
-                        serverManager.resetServer()
-                        dismiss()
-                    }
-                }
+    private var serversSection: some View {
+        Section("Servers") {
+            ForEach(serverManager.savedServers) { server in
+                serverRow(server)
             }
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
-                }
+            .onDelete(perform: serverManager.removeServer)
+        }
+    }
+
+    private func serverRow(_ server: SavedServer) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(server.name).font(.headline)
+                Text(server.url).font(.caption).foregroundColor(.secondary)
             }
-            .sheet(isPresented: $showAddServer) {
-                AddServerView(onAdd: { name, url in
-                    if serverManager.addServer(name: name, urlString: url) {
-                        showAddServer = false
-                    } else {
-                        addError = true
-                    }
-                })
+            Spacer()
+            if serverManager.serverURL?.absoluteString == server.url {
+                Image(systemName: "checkmark").foregroundColor(.accentColor)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            serverManager.selectServer(server.url)
+            dismiss()
+        }
+    }
+
+    private var addSection: some View {
+        Section {
+            Button("Add Server") { showAddServer = true }
+        }
+    }
+
+    private var resetSection: some View {
+        Section {
+            Button("Back to Setup", role: .destructive) {
+                serverManager.resetServer()
+                dismiss()
             }
         }
     }
@@ -164,7 +179,7 @@ struct AddServerView: View {
                 if showError {
                     Section {
                         Text("Invalid URL. Must start with http:// or https://")
-                            .foregroundStyle(.red)
+                            .foregroundColor(.red)
                             .font(.caption)
                     }
                 }

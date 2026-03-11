@@ -16,7 +16,7 @@ struct ServerPickerView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "square.stack.3d.up.fill")
                         .font(.system(size: 56))
-                        .foregroundStyle(.accentColor)
+                        .foregroundColor(.accentColor)
                         .padding(.top, 48)
                     Text("amux")
                         .font(.largeTitle.bold())
@@ -114,7 +114,7 @@ private struct ServerOptionButton: View {
             HStack(spacing: 16) {
                 Image(systemName: icon)
                     .font(.title2)
-                    .foregroundStyle(.accentColor)
+                    .foregroundColor(.accentColor)
                     .frame(width: 36)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title).font(.headline).foregroundStyle(.primary)
@@ -126,7 +126,7 @@ private struct ServerOptionButton: View {
                     .foregroundStyle(.tertiary)
             }
             .padding()
-            .background(.secondarySystemGroupedBackground)
+            .background(Color(uiColor: .secondarySystemGroupedBackground))
             .clipShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
