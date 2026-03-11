@@ -31,6 +31,17 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Verify Info.plist and icons
+        run: |
+          echo "=== Info.plist ==="
+          cat AmuxApp/Info.plist
+          echo ""
+          echo "=== AppIcon Contents.json ==="
+          cat AmuxApp/Assets.xcassets/AppIcon.appiconset/Contents.json
+          echo ""
+          echo "=== Icon files ==="
+          ls -la AmuxApp/Assets.xcassets/AppIcon.appiconset/
+
       - name: Set up SSH for match
         run: |
           mkdir -p ~/.ssh
