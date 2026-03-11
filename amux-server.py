@@ -17858,8 +17858,13 @@ function _switchServerUrl(idx, evt) {
     deviceName: localStorage.getItem('amux_device_name') || ''
   }));
   const url = s.url.replace(/\/+$/, '') + '/?_sync=' + encodeURIComponent(payload);
-  // Always navigate in the same window — avoid opening a new browser instance in PWA
-  location.href = url;
+  // Same-origin: navigate in place. Cross-origin: open new tab so PWA stays accessible
+  // if the destination is unreachable from this device (e.g. localhost from mobile).
+  try {
+    const destOrigin = new URL(url).origin;
+    if (destOrigin === location.origin) { location.href = url; }
+    else { window.open(url, '_blank'); }
+  } catch(e) { location.href = url; }
 }
 
 function switchServer(idx) {
@@ -17877,8 +17882,12 @@ function switchServer(idx) {
     deviceName: localStorage.getItem('amux_device_name') || ''
   }));
   const url = s.url + '/?_sync=' + encodeURIComponent(payload);
-  // Navigate in same window — never open a new browser instance
-  location.href = url;
+  // Same-origin: navigate in place. Cross-origin: open new tab to keep current PWA accessible.
+  try {
+    const destOrigin = new URL(url).origin;
+    if (destOrigin === location.origin) { location.href = url; }
+    else { window.open(url, '_blank'); }
+  } catch(e) { location.href = url; }
 }
 
 // ═══════ SETTINGS DROPDOWN ═══════
@@ -19885,7 +19894,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'amux-v0.6.5';
+const CACHE = 'amux-v0.6.6';
 const SHELL_URLS = ['/', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
