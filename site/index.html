@@ -132,10 +132,15 @@ html[data-theme="dark"] .waitlist-btn { background: #e8e8e8; color: #0a0a0a; }
 .theme-toggle .icon-sun, .theme-toggle .icon-moon { display: none; }
 html:not([data-theme="dark"]) .theme-toggle .icon-moon { display: inline; }
 html[data-theme="dark"] .theme-toggle .icon-sun { display: inline; }
+body { overflow-x: hidden; }
 @media (max-width: 768px) {
   .site-header { padding: 0 1rem; }
   .site-header nav { gap: 1rem; }
   .site-header nav a.hide-mobile { display: none; }
+  .section-wide, .section { padding-left: 1rem; padding-right: 1rem; }
+  .api-path { word-break: break-all; }
+  .terminal-body { font-size: 0.72rem; }
+  code { word-break: break-all; }
 }
 
 /* ── HERO ── */
@@ -272,8 +277,9 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
 .reveal.visible { opacity: 1; transform: none; }
 
 /* ── DIFF TABLE ── */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
 .diff-table {
-  width: 100%; border-collapse: collapse; font-size: 0.82rem;
+  width: 100%; min-width: 480px; border-collapse: collapse; font-size: 0.82rem;
   border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
   font-family: var(--sans);
 }
@@ -281,7 +287,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
   text-align: left; padding: 0.75rem 1rem;
   background: var(--surface); border-bottom: 1px solid var(--border);
   font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--muted); font-weight: 500;
+  color: var(--muted); font-weight: 500; white-space: nowrap;
 }
 .diff-table th.col-amux { color: var(--text); font-weight: 700; }
 .diff-table td {
@@ -391,7 +397,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
 .slides-dots button.active { background: var(--accent); }
 
 /* ── CLI TABLE ── */
-.cli-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; font-family: var(--sans); }
+.cli-table { width: 100%; min-width: 400px; border-collapse: collapse; font-size: 0.85rem; font-family: var(--sans); }
 .cli-table th {
   text-align: left; color: var(--muted); font-weight: 500;
   font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
@@ -403,7 +409,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
 }
 .cli-table tr:hover td { background: var(--surface); }
 .cli-table .cmd-cell  { color: var(--text); font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
-.cli-table .alias-cell { color: var(--muted); font-family: var(--mono); font-size: 0.82rem; }
+.cli-table .alias-cell { color: var(--muted); font-family: var(--mono); font-size: 0.82rem; white-space: nowrap; }
 .cli-table .desc-cell  { color: var(--dim); }
 
 /* ── API ── */
@@ -687,6 +693,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
   <div class="section-label">How it's different</div>
   <div class="section-title">amux is not another Claude wrapper</div>
   <div class="section-desc">Claude Code runs one agent per terminal. amux runs dozens -- with monitoring, coordination, and mobile access that don't exist anywhere else.</div>
+  <div class="table-scroll">
   <table class="diff-table">
     <thead>
       <tr>
@@ -706,6 +713,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
       <tr><td class="row-label">Setup</td><td class="has">1 file, 0 deps, git clone + install.sh</td><td class="has">pip install</td><td class="partial">Docker, config files, API keys</td></tr>
     </tbody>
   </table>
+  </div>
 </div>
 
 <hr class="divider">
@@ -811,6 +819,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
   <div class="section-label">CLI</div>
   <div class="section-title">One command, any action</div>
   <div class="section-desc">Session names support prefix matching -- <code style="color:var(--green)">amux a my</code> resolves to <code style="color:var(--dim)">myproject</code>.</div>
+  <div class="table-scroll">
   <table class="cli-table">
     <thead>
       <tr><th>Command</th><th>Alias</th><th>Description</th></tr>
@@ -829,6 +838,7 @@ html[data-theme="dark"] .gh-star-badge { background: rgba(255,255,255,0.08); }
       <tr><td class="cmd-cell">amux defaults</td><td class="alias-cell">config</td><td class="desc-cell">Manage default flags</td></tr>
     </tbody>
   </table>
+  </div>
 </div>
 
 <hr class="divider">
