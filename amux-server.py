@@ -22659,6 +22659,63 @@ def _cleanup_tmp():
         slog(f"[cleanup] pruned {cleaned} stale entries from {tmp_dir}")
 
 
+_IDLE_ARCHIVE_HOURS = 8  # archive sessions idle longer than this
+
+def _auto_archive_idle():
+    """Archive sessions that have been idle (no tmux activity) for too long."""
+    cutoff = time.time() - _IDLE_ARCHIVE_HOURS * 3600
+    # Protected sessions that should never be auto-archived
+    protected = {"amux-2", "amux-cloud", "amux-ios", "amux-reports"}
+    archived = []
+    for env_file in sorted(CC_SESSIONS.glob("*.env")):
+        name = env_file.stem
+        if name in protected:
+            continue
+        cfg = parse_env_file(env_file)
+        if cfg.get("CC_ARCHIVED") == "1":
+            continue
+        if not is_running(name):
+            continue
+        # Check tmux pane last activity time
+        try:
+            r = subprocess.run(
+                ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_activity}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0 or not r.stdout.strip():
+                continue
+            pane_activity = int(r.stdout.strip())
+            if pane_activity < cutoff:
+                ok, msg = archive_session(name)
+                if ok:
+                    archived.append(name)
+        except Exception:
+            pass
+    if archived:
+        slog(f"[auto-archive] archived {len(archived)} idle sessions: {', '.join(archived)}")
+
+
+def _cleanup_old_transcripts():
+    """Remove conversation transcripts older than 7 days and larger than 50 MB."""
+    projects_dir = Path.home() / ".claude" / "projects"
+    if not projects_dir.is_dir():
+        return
+    cutoff = time.time() - 7 * 86400
+    cleaned = 0
+    freed = 0
+    for jsonl in projects_dir.rglob("*.jsonl"):
+        try:
+            st = jsonl.stat()
+            if st.st_size > 50_000_000 and st.st_mtime < cutoff:
+                freed += st.st_size
+                jsonl.unlink(missing_ok=True)
+                cleaned += 1
+        except Exception:
+            pass
+    if cleaned:
+        slog(f"[cleanup] removed {cleaned} old transcripts, freed {freed / 2**20:.0f} MB")
+
+
 def _auto_update_check(_state: dict = {}):
     """Scheduled job: poll GitHub for changes and overwrite self if newer.
     Uses mutable default dict to carry last_sha across ticks."""
@@ -23033,6 +23090,8 @@ def main():
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
+    schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
+    schedule_job(_cleanup_old_transcripts, interval=86400,              name="transcript_cleanup", initial_delay=600)
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
         schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
