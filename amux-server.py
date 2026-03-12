@@ -99,6 +99,35 @@ def slog(*args):
     except Exception:
         pass
 
+# ── Browser automation helpers ────────────────────────────────────────────────
+_BROWSER_HELPER = Path.home() / ".amux" / "browser-helper.js"
+_NODE_BIN = shutil.which("node") or "/usr/local/bin/node"
+
+def _pw_list_profiles() -> list:
+    d = Path.home() / ".amux" / "playwright-auth" / "profiles"
+    if not d.exists():
+        return []
+    return sorted(p.name for p in d.iterdir() if p.is_dir())
+
+def _browser_call(cmd: dict, timeout_s: int = 40) -> dict:
+    """Run ~/.amux/browser-helper.js with a JSON command, return parsed result."""
+    try:
+        r = subprocess.run(
+            [_NODE_BIN, str(_BROWSER_HELPER)],
+            input=json.dumps(cmd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        out = r.stdout.strip()
+        if not out:
+            return {"error": r.stderr.strip() or f"node exited {r.returncode}"}
+        return json.loads(out)
+    except subprocess.TimeoutExpired:
+        return {"error": "browser operation timed out"}
+    except Exception as e:
+        return {"error": str(e)}
+
 # SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
 _sse_cache = {
     "sessions": {"data": None, "json": "", "time": 0},
@@ -21973,6 +22002,44 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json([dict(r) for r in rows])
 
             return self._json({"error": "not found"}, 404)
+
+        # ── Browser automation (/api/browser/*) ───────────────────────────────
+        if path.startswith("/api/browser"):
+
+            # GET /api/browser/profiles
+            if method == "GET" and path == "/api/browser/profiles":
+                return self._json({"profiles": _pw_list_profiles()})
+
+            # GET /api/browser/search?q=...&profile=google
+            if method == "GET" and path == "/api/browser/search":
+                q = qs.get("q", [""])[0] if isinstance(qs.get("q"), list) else qs.get("q", "")
+                prof = qs.get("profile", ["google"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "google")
+                if not q:
+                    return self._json({"error": "q required"}, 400)
+                result = _browser_call({"cmd": "search", "q": q, "profile": prof}, timeout_s=45)
+                status = 429 if "CAPTCHA" in result.get("error", "") else 200
+                return self._json(result, status)
+
+            # POST /api/browser/login  {"url":"...","username":"...","password":"...","profile":"name"}
+            if method == "POST" and path == "/api/browser/login":
+                body = self._read_body()
+                if not body.get("url") or not body.get("profile"):
+                    return self._json({"error": "url and profile are required"}, 400)
+                return self._json(_browser_call({
+                    "cmd": "login",
+                    "url": body["url"],
+                    "username": body.get("username", ""),
+                    "password": body.get("password", ""),
+                    "profile": body["profile"],
+                }, timeout_s=45))
+
+            # GET /api/browser/screenshot?profile=NAME&url=https://...
+            if method == "GET" and path == "/api/browser/screenshot":
+                prof = qs.get("profile", ["default"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "default")
+                url_param = qs.get("url", [""])[0] if isinstance(qs.get("url"), list) else qs.get("url", "")
+                return self._json(_browser_call({"cmd": "screenshot", "profile": prof, "url": url_param or None}))
+
+            return self._json({"error": "browser route not found"}, 404)
 
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
