@@ -10746,6 +10746,13 @@ function _renderGitTreePanel(files, ahead, aheadBase) {
     });
   }
 
+  if (!files.length && !ahead.length) {
+    const msg = document.createElement('div');
+    msg.style.cssText = 'color:var(--dim);font-size:0.85rem;padding:20px 16px;text-align:center;';
+    msg.textContent = 'Working tree clean — no uncommitted changes.';
+    treeEl.appendChild(msg);
+    return;
+  }
   if (!files.length) return;
 
   const lbl2 = document.createElement('div');
