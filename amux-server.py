@@ -7197,8 +7197,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-sidebar-section { border-bottom: 1px solid var(--border); padding: 8px 10px; flex-shrink: 0; }
   .map-section-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 0.72rem; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.03em; }
   .map-tag-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-  .map-tag-chip { padding: 2px 8px; border-radius: 12px; font-size: 0.72rem; font-weight: 500; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--dim); transition: all 0.15s; white-space: nowrap; }
-  .map-tag-chip:hover { color: var(--text); border-color: var(--dim); }
+  .map-tag-chip { padding: 2px 8px; border-radius: 12px; font-size: 0.72rem; font-weight: 500; cursor: pointer; border: 1px solid; background: transparent; transition: all 0.15s; white-space: nowrap; color: var(--dim); border-color: var(--border); }
+  .map-tag-chip:hover { opacity: 0.85; }
   .map-tag-chip.all-active { background: var(--accent); color: #fff; border-color: transparent; }
   .map-tag-chip.tag-active { color: #fff; border-color: transparent; }
   .map-search-section { padding: 8px 10px; flex-shrink: 0; border-bottom: 1px solid var(--border); }
@@ -7239,6 +7239,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .map-modal-tags-row { display: flex; flex-wrap: wrap; gap: 6px; min-height: 24px; }
   .map-tag-check { display: flex; align-items: center; gap: 5px; font-size: 0.78rem; cursor: pointer; padding: 3px 9px; border-radius: 10px; border: 1px solid var(--border); transition: all 0.12s; user-select: none; }
   .map-tag-check input { display: none; }
+  .map-tag-check.checked { color: #fff; border-color: transparent; }
+  .map-tag-check .map-tag-swatch { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .map-tag-color-row { display: flex; align-items: center; gap: 10px; font-size: 0.82rem; color: var(--text); }
   .map-tag-color-row input[type=color] { width: 36px; height: 28px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: none; padding: 2px; }
   .map-modal-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
@@ -14346,12 +14348,16 @@ function _mapPinColor(pin) {
 
 function _mapMakeIcon(pin) {
   const color = _mapPinColor(pin);
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="32" viewBox="0 0 24 32">' +
+    '<path d="M12 0C5.373 0 0 5.373 0 12c0 9 12 20 12 20s12-11 12-20C24 5.373 18.627 0 12 0z" fill="' + color + '" stroke="#fff" stroke-width="1.5"/>' +
+    '<circle cx="12" cy="12" r="4.5" fill="rgba(255,255,255,0.55)"/>' +
+  '</svg>';
   return L.divIcon({
     className: '',
-    html: '<div style="width:14px;height:14px;background:' + color + ';border:2px solid rgba(255,255,255,0.8);border-radius:50%;box-shadow:0 1px 5px rgba(0,0,0,0.5);cursor:pointer"></div>',
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
-    popupAnchor: [0, -10]
+    html: svg,
+    iconSize: [24, 32],
+    iconAnchor: [12, 32],
+    popupAnchor: [0, -34]
   });
 }
 
@@ -14373,7 +14379,10 @@ function _mapRenderTags() {
   let html = '<button class="map-tag-chip' + (allActive ? ' all-active' : '') + '" onclick="_mapFilterByTag(null)">All</button>';
   _mapTags.forEach(function(tag) {
     const active = _mapFilterTags.has(tag.id);
-    html += '<button class="map-tag-chip' + (active ? ' tag-active' : '') + '" style="' + (active ? 'background:' + tag.color + ';' : '--tag-color:' + tag.color + ';') + '" onclick="_mapFilterByTag(\x27' + tag.id + '\x27)" oncontextmenu="event.preventDefault();_mapEditTag(\x27' + tag.id + '\x27)" title="Right-click to edit">' + escHtml(tag.name) + '</button>';
+    const chipStyle = active
+      ? 'background:' + tag.color + ';border-color:' + tag.color + ';color:#fff;'
+      : 'color:' + tag.color + ';border-color:' + tag.color + '88;';
+    html += '<button class="map-tag-chip' + (active ? ' tag-active' : '') + '" style="' + chipStyle + '" onclick="_mapFilterByTag(\x27' + tag.id + '\x27)" oncontextmenu="event.preventDefault();_mapEditTag(\x27' + tag.id + '\x27)" title="Right-click to edit">' + escHtml(tag.name) + '</button>';
   });
   el.innerHTML = html;
 }
@@ -14405,7 +14414,7 @@ function _mapRenderPins() {
     const color = _mapPinColor(pin);
     const tagChips = (pin.tags||[]).map(function(tid) {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
-      return tag ? '<span class="map-pin-tag" style="background:' + tag.color + '22;color:' + tag.color + ';border-color:' + tag.color + '55">' + escHtml(tag.name) + '</span>' : '';
+      return tag ? '<span class="map-pin-tag" style="background:' + tag.color + ';color:#fff;border-color:' + tag.color + '">' + escHtml(tag.name) + '</span>' : '';
     }).join('');
     return '<div class="map-pin-item" onclick="_mapFlyToPin(\x27' + pin.id + '\x27)" ondblclick="_mapOpenPinModal(\x27' + pin.id + '\x27)">' +
       '<div class="map-pin-dot" style="background:' + color + '"></div>' +
@@ -14428,7 +14437,7 @@ function _mapRenderMarkers() {
     const marker = L.marker([pin.lat, pin.lng], { icon: _mapMakeIcon(pin) }).addTo(_map);
     const tagChips = (pin.tags||[]).map(function(tid) {
       const tag = _mapTags.find(function(t) { return t.id === tid; });
-      return tag ? '<span style="display:inline-block;padding:1px 6px;border-radius:8px;font-size:11px;background:' + tag.color + '22;color:' + tag.color + '">' + escHtml(tag.name) + '</span>' : '';
+      return tag ? '<span style="display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;font-weight:500;background:' + tag.color + ';color:#fff;">' + escHtml(tag.name) + '</span>' : '';
     }).join(' ');
     marker.bindPopup(
       '<div style="min-width:140px;font-family:inherit;font-size:13px">' +
@@ -14519,8 +14528,13 @@ function _mapOpenPinModal(id, latlng) {
   } else {
     tagsRow.innerHTML = _mapTags.map(function(tag) {
       const checked = pinTags.includes(tag.id);
-      return '<label class="map-tag-check' + (checked ? ' checked' : '') + '" style="--tag-color:' + tag.color + '" onclick="_mapToggleTagCheck(this)">' +
-        '<input type="checkbox" value="' + tag.id + '"' + (checked ? ' checked' : '') + '><span>' + escHtml(tag.name) + '</span></label>';
+      const labelStyle = checked
+        ? 'background:' + tag.color + ';border-color:' + tag.color + ';color:#fff;'
+        : 'border-color:' + tag.color + '88;color:var(--text);';
+      return '<label class="map-tag-check' + (checked ? ' checked' : '') + '" style="' + labelStyle + '" onclick="_mapToggleTagCheck(this)">' +
+        '<input type="checkbox" value="' + tag.id + '"' + (checked ? ' checked' : '') + '>' +
+        '<span class="map-tag-swatch" data-color="' + tag.color + '" style="background:' + (checked ? 'rgba(255,255,255,0.5)' : tag.color) + '"></span>' +
+        '<span>' + escHtml(tag.name) + '</span></label>';
     }).join('');
   }
   document.getElementById('map-pin-delete-btn').style.display = pin ? '' : 'none';
@@ -14533,6 +14547,19 @@ function _mapToggleTagCheck(label) {
   const cb = label.querySelector('input');
   cb.checked = !cb.checked;
   label.classList.toggle('checked', cb.checked);
+  const swatch = label.querySelector('.map-tag-swatch');
+  const tagColor = swatch ? swatch.dataset.color : '';
+  if (cb.checked) {
+    label.style.background = tagColor;
+    label.style.borderColor = tagColor;
+    label.style.color = '#fff';
+    if (swatch) swatch.style.background = 'rgba(255,255,255,0.5)';
+  } else {
+    label.style.background = '';
+    label.style.borderColor = tagColor + '88';
+    label.style.color = '';
+    if (swatch) swatch.style.background = tagColor;
+  }
 }
 
 function _mapClosePinModal() {
