@@ -3695,6 +3695,22 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         return False, "tmux not found"
 
 
+def _send_after_ready(name: str, text: str, timeout: int = 30):
+    """Wait for Claude's input prompt (❯) to appear, then send text."""
+    for _ in range(timeout):
+        time.sleep(1)
+        output = tmux_capture(name, 5)
+        if not output:
+            continue
+        # Claude shows ❯ (U+276F) or > when ready for input
+        if "\u276f" in output or "\u2771" in output:
+            time.sleep(0.5)  # small extra delay for readline
+            send_text(name, text)
+            return
+    # Timeout — send anyway as a best effort
+    send_text(name, text)
+
+
 def stop_session(name: str) -> tuple[bool, str]:
     if not is_running(name):
         return True, "not running"
@@ -6619,6 +6635,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     padding: 4px 8px; outline: none; width: 130px;
   }
   .ws-save-input::placeholder { color: var(--dim); }
+  .ws-preset-dropdown {
+    position: relative; display: inline-block;
+  }
+  .ws-preset-btn {
+    font-size: 0.75rem; padding: 4px 10px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--dim); white-space: nowrap;
+  }
+  .ws-preset-btn:hover { background: var(--hover); color: var(--text); }
+  .ws-preset-menu {
+    display: none; position: absolute; top: 100%; left: 0; margin-top: 4px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 4px 0; z-index: 900; min-width: 160px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .ws-preset-menu.open { display: block; }
+  .ws-preset-menu button {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 12px;
+    background: none; border: none; color: var(--text); font-size: 0.78rem;
+    cursor: pointer; text-align: left;
+  }
+  .ws-preset-menu button:hover { background: var(--hover); }
+  .ws-preset-menu button .preset-icon {
+    font-size: 0.65rem; color: var(--dim); font-family: var(--mono); width: 32px;
+    text-align: center; flex-shrink: 0;
+  }
   #gridstack-container { flex: 1; overflow-y: auto; padding: 4px; }
   .gp-header {
     display: flex; align-items: center; padding: 0 10px; gap: 8px;
@@ -10603,13 +10645,18 @@ function clearSendingIndicator() {
 
 async function doSend(name, text) {
   showSendingIndicator();
-  const now = new Date();
-  const ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true});
-  const author = _cloudEmail ? ` ${_cloudEmail}` : '';
-  const stamped = `[${ts}${author}] ${text}`;
+  // Slash commands (e.g. /clear, /compact) must be sent verbatim — no timestamp prefix
+  const isSlashCmd = /^\/[a-z]/.test(text.trim());
+  let payload = text;
+  if (!isSlashCmd) {
+    const now = new Date();
+    const ts = now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: true});
+    const author = _cloudEmail ? ` ${_cloudEmail}` : '';
+    payload = `[${ts}${author}] ${text}`;
+  }
   await apiCall(API + '/api/sessions/' + name + '/send', {
     method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({text: stamped})
+    body: JSON.stringify({text: payload})
   });
 }
 
@@ -13374,16 +13421,12 @@ async function submitCreate() {
         body: JSON.stringify({branch: 'none'}),
       }).catch(() => {});
     }
-    // Always start the session immediately
-    await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
-    if (prompt) {
-      setTimeout(async () => {
-        await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ text: prompt })
-        });
-      }, 5000);
-    }
+    // Start session — pass prompt to server so it waits for Claude to be ready
+    const startBody = prompt ? { prompt } : {};
+    await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(startBody)
+    });
   }
   await fetchSessions();
   // Scroll to the newly created session card
@@ -16740,6 +16783,95 @@ function _wsRenderProfileBar() {
   }).join('');
 }
 
+// ── Layout Presets ──
+function wsTogglePresetMenu() {
+  const menu = document.getElementById('ws-preset-menu');
+  if (!menu) return;
+  menu.classList.toggle('open');
+  if (menu.classList.contains('open')) {
+    // Close on outside click
+    setTimeout(() => document.addEventListener('click', _wsClosePresetMenu, { once: true }), 0);
+  }
+}
+function _wsClosePresetMenu(e) {
+  const menu = document.getElementById('ws-preset-menu');
+  if (menu) menu.classList.remove('open');
+}
+
+function wsApplyPreset(preset) {
+  document.getElementById('ws-preset-menu')?.classList.remove('open');
+  if (!_grid) return;
+  // Get active pane names (or all sessions if none open)
+  let names = Object.keys(_gridPanes);
+  if (!names.length) {
+    names = (sessions || []).map(s => s.name);
+  }
+  if (!names.length) return;
+
+  // Clear existing panes
+  Object.keys(_gridPanes).slice().forEach(n => removeGridPane(n));
+
+  // Calculate layout positions
+  const layouts = _wsCalcPreset(preset, names.length);
+
+  // Add panes with calculated positions
+  _grid.batchUpdate();
+  names.forEach((name, i) => {
+    if (i < layouts.length) {
+      const l = layouts[i];
+      addGridPane(name, l.x, l.y, l.w, l.h);
+    }
+  });
+  _grid.commit();
+  _gridSaveLayout();
+}
+
+function _wsCalcPreset(preset, count) {
+  const items = [];
+  switch (preset) {
+    case 'focus':
+      // Single column, all stacked full-width
+      for (let i = 0; i < count; i++)
+        items.push({ x: 0, y: i * 7, w: 12, h: 7 });
+      break;
+    case 'split':
+      // 2 equal columns
+      for (let i = 0; i < count; i++)
+        items.push({ x: (i % 2) * 6, y: Math.floor(i / 2) * 7, w: 6, h: 7 });
+      break;
+    case 'tri':
+      // 3 equal columns
+      for (let i = 0; i < count; i++)
+        items.push({ x: (i % 3) * 4, y: Math.floor(i / 3) * 7, w: 4, h: 7 });
+      break;
+    case 'grid-2x2':
+      // 2x2 grid, overflow into new rows
+      for (let i = 0; i < count; i++)
+        items.push({ x: (i % 2) * 6, y: Math.floor(i / 2) * 7, w: 6, h: 7 });
+      break;
+    case 'main-side':
+      // First pane takes 8 cols, rest stack in 4-col sidebar
+      if (count === 1) {
+        items.push({ x: 0, y: 0, w: 12, h: 14 });
+      } else {
+        items.push({ x: 0, y: 0, w: 8, h: Math.max(7, (count - 1) * 5) });
+        for (let i = 1; i < count; i++)
+          items.push({ x: 8, y: (i - 1) * 5, w: 4, h: 5 });
+      }
+      break;
+    case 'rows':
+      // Full-width stacked rows, shorter height
+      for (let i = 0; i < count; i++)
+        items.push({ x: 0, y: i * 5, w: 12, h: 5 });
+      break;
+    default:
+      // Fallback: 2-column
+      for (let i = 0; i < count; i++)
+        items.push({ x: (i % 2) * 6, y: Math.floor(i / 2) * 7, w: 6, h: 7 });
+  }
+  return items;
+}
+
 function gpDoKeys(name, keys) { doKeys(name, keys); }
 
 function gpChipToInput(name, text) {
@@ -18602,22 +18734,69 @@ function _torrentBrowseDir() {
 let _vpRAF = null;
 let _vpHideTimer = null;
 
+function _vpPosKey(url) { return 'amux_vp_pos_' + url; }
+
 function _playVideo(gid, encodedPath) {
   const url = API + '/api/torrents/' + gid + '/file?path=' + encodedPath;
   const fname = decodeURIComponent(encodedPath).split('/').pop();
   const v = document.getElementById('video-player');
   v.src = url;
+  v._vpUrl = url;
   document.getElementById('vp-title').textContent = fname;
   document.getElementById('video-overlay').style.display = 'flex';
+  // Restore saved position after metadata loads (setting currentTime before metadata is ignored)
+  const key = _vpPosKey(url);
+  const raw = localStorage.getItem(key);
+  const saved = parseFloat(raw);
+  console.log('[VP] _playVideo url=' + url);
+  console.log('[VP] _playVideo posKey=' + key);
+  console.log('[VP] _playVideo raw saved=' + raw + ', parsed=' + saved);
+  if (saved > 0) {
+    const doSeek = () => {
+      console.log('[VP] loadedmetadata fired, seeking to ' + saved + ' (readyState=' + v.readyState + ')');
+      v.currentTime = saved;
+      v.removeEventListener('loadedmetadata', doSeek);
+    };
+    if (v.readyState >= 1) {
+      console.log('[VP] readyState already ' + v.readyState + ', seeking immediately to ' + saved);
+      v.currentTime = saved;
+    } else {
+      console.log('[VP] readyState=' + v.readyState + ', waiting for loadedmetadata');
+      v.addEventListener('loadedmetadata', doSeek);
+    }
+  } else {
+    console.log('[VP] no saved position, starting from 0');
+  }
   v.play().catch(() => {});
   _vpStartLoop();
   _vpShowControls();
+  // Save position periodically
+  v.onpause = () => { console.log('[VP] onpause, saving pos'); _vpSavePos(v); };
+  v.onseeked = () => { console.log('[VP] onseeked, saving pos'); _vpSavePos(v); };
+}
+
+function _vpSavePos(v) {
+  if (!v._vpUrl || !v.currentTime) {
+    console.log('[VP] _vpSavePos skip: url=' + !!v._vpUrl + ' currentTime=' + v.currentTime);
+    return;
+  }
+  // Clear saved pos if near the end (within 10s)
+  if (v.duration && v.currentTime > v.duration - 10) {
+    console.log('[VP] _vpSavePos near-end, clearing (' + v.currentTime.toFixed(1) + '/' + v.duration.toFixed(1) + ')');
+    localStorage.removeItem(_vpPosKey(v._vpUrl));
+  } else {
+    console.log('[VP] _vpSavePos saving ' + v.currentTime.toFixed(1) + 's for ' + v._vpUrl.slice(-40));
+    localStorage.setItem(_vpPosKey(v._vpUrl), String(v.currentTime));
+  }
 }
 
 function _closeVideo() {
   const v = document.getElementById('video-player');
+  console.log('[VP] _closeVideo: url=' + !!v._vpUrl + ' currentTime=' + (v.currentTime||0).toFixed(1));
+  _vpSavePos(v);
   v.pause();
   v.removeAttribute('src');
+  v._vpUrl = null;
   v.load();
   document.getElementById('video-overlay').style.display = 'none';
   if (_vpRAF) { cancelAnimationFrame(_vpRAF); _vpRAF = null; }
@@ -18649,6 +18828,8 @@ function _vpStartLoop() {
     document.getElementById('vp-time').textContent = _vpFmtTime(cur) + ' / ' + _vpFmtTime(dur);
     // Play/pause icon
     document.getElementById('vp-play').innerHTML = v.paused ? '&#x25B6;' : '&#x23F8;';
+    // Auto-save position every ~5s
+    if (!v.paused && v._vpUrl && Math.floor(cur) % 5 === 0) _vpSavePos(v);
     _vpRAF = requestAnimationFrame(update);
   }
   if (_vpRAF) cancelAnimationFrame(_vpRAF);
@@ -20211,6 +20392,17 @@ async function _gmailSubmitCode(account) {
         onkeydown="if(event.key==='Enter'){wsSaveProfileConfirm();event.preventDefault();}if(event.key==='Escape'){wsHideSaveInput();}">
       <button id="ws-save-btn" class="btn" onclick="wsShowSaveInput()" style="font-size:0.75rem;padding:4px 10px;" title="Save current layout as a profile">&#x2B; Save</button>
       <button id="ws-save-ok" class="btn" onclick="wsSaveProfileConfirm()" style="display:none;font-size:0.75rem;padding:4px 10px;background:var(--green);color:#fff;border-color:var(--green);">&#x2713;</button>
+    </div>
+    <div class="ws-preset-dropdown" id="ws-preset-dropdown">
+      <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
+      <div class="ws-preset-menu" id="ws-preset-menu">
+        <button onclick="wsApplyPreset('focus')"><span class="preset-icon">&#x25A0;</span> Focus (1 col)</button>
+        <button onclick="wsApplyPreset('split')"><span class="preset-icon">&#x25EB;</span> Split (2 col)</button>
+        <button onclick="wsApplyPreset('tri')"><span class="preset-icon">&#x2630;</span> 3 Columns</button>
+        <button onclick="wsApplyPreset('grid-2x2')"><span class="preset-icon">&#x25A6;</span> 2&times;2 Grid</button>
+        <button onclick="wsApplyPreset('main-side')"><span class="preset-icon">&#x25E7;</span> Main + Sidebar</button>
+        <button onclick="wsApplyPreset('rows')"><span class="preset-icon">&#x2261;</span> Stacked Rows</button>
+      </div>
     </div>
     <button class="btn" onclick="wsClearWorkspace()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;color:var(--dim);" title="Remove all panes">Clear</button>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
@@ -23576,8 +23768,13 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 send_text(name, msg)
                 return self._json({"ok": True, "message": "deploy instructions sent to session"})
             if action == "start":
+                body = self._read_body() if method == "POST" else {}
                 ok, msg = start_session(name)
                 meta = _load_meta(name)
+                # If a prompt was provided, wait for Claude to be ready then send it
+                initial_prompt = body.get("prompt", "").strip() if body else ""
+                if ok and initial_prompt:
+                    threading.Thread(target=_send_after_ready, args=(name, initial_prompt), daemon=True).start()
                 return self._json({"ok": ok, "message": msg, "resumed": bool(meta.get("cc_conversation_id"))}, 200 if ok else 500)
             if action == "stop":
                 ok, msg = stop_session(name)
