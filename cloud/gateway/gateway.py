@@ -157,6 +157,10 @@ _LOGIN_HTML = """<!DOCTYPE html>
         if (!window.Clerk) { setStatus('ERROR: Clerk not initialized'); return; }
         await window.Clerk.load();
         setStatus('');
+        // If redirected from logout, sign out of Clerk too
+        if (new URLSearchParams(location.search).has('logout') && window.Clerk.user) {
+          await window.Clerk.signOut();
+        }
         if (window.Clerk.user) { await exchangeAndRedirect(); return; }
         window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
         window.Clerk.addListener(({ user }) => {
@@ -796,7 +800,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cloud-logout" and self.command in ("GET", "POST"):
             sec = self._secure_cookie_flags()
             self.send_response(302)
-            self.send_header("Location", "/")
+            self.send_header("Location", "/?logout")
             self.send_header("Set-Cookie",
                 f"amux_session=; HttpOnly{sec}; SameSite=Lax; Max-Age=0; Path=/")
             self.send_header("Content-Length", "0")
