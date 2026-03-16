@@ -19,7 +19,7 @@
 <meta property="og:image:height" content="640">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://amux.io/og-image.png">
-<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer with web dashboard, kanban board, and mobile PWA.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"amux","alternateName":"Agent Multiplexer","description":"Run dozens of Claude Code agents in parallel, unattended, with self-healing. Open-source agent multiplexer with web dashboard, kanban board, and mobile PWA.","url":"https://amux.io","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","offers":[{"@type":"Offer","name":"Open Source","price":"0","priceCurrency":"USD"},{"@type":"Offer","name":"Cloud Monthly","price":"20","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1M"}},{"@type":"Offer","name":"Cloud Annual","price":"200","priceCurrency":"USD","priceSpecification":{"@type":"UnitPriceSpecification","billingDuration":"P1Y"}}],"author":{"@type":"Organization","name":"Mixpeek","url":"https://mixpeek.com"}}</script>
 <script>(function(){var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme:dark)').matches))document.documentElement.setAttribute('data-theme','dark')})()</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -772,6 +772,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 <header class="site-header">
   <a class="logo" href="/">amux</a>
   <div class="nav-links">
+    <a href="/pricing/">Pricing</a>
     <a href="/guides/" class="hide-mobile">Guides</a>
     <a href="/blog/" class="hide-mobile">Blog</a>
     <a href="/changelog/" class="hide-mobile">Changelog</a>
@@ -795,9 +796,9 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
   <h1 class="hero-h1">Run dozens of Claude Code agents from your phone<span class="hth-cursor"></span></h1>
   <p class="hero-sub">Self-healing, parallel AI coding sessions with a web dashboard, mobile app, and agent-to-agent orchestration. Zero external dependencies.</p>
   <div class="hero-ctas">
-    <a class="cta-pill cta-pill-primary" href="#cloud">
+    <a class="cta-pill cta-pill-primary" href="https://cloud.amux.io">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
-      Join Cloud Waitlist
+      Try Cloud Free
     </a>
     <a class="cta-pill" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -953,19 +954,24 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
 
 <hr class="divider">
 
-<!-- CLOUD WAITLIST -->
+<!-- CLOUD PRICING -->
 <div id="cloud" class="waitlist-section reveal">
-  <div class="waitlist-container">
-    <div class="waitlist-eyebrow">amux Cloud &mdash; coming soon</div>
+  <div class="waitlist-container" style="max-width:720px;">
+    <div class="waitlist-eyebrow">amux Cloud</div>
     <div class="waitlist-title">amux without the setup</div>
-    <div class="waitlist-desc">Hosted amux &mdash; persistent sessions, isolated environment, full feature parity. Free tier available at launch.</div>
-    <div class="waitlist-form" id="waitlist-form">
-      <input class="waitlist-input" id="waitlist-email" type="email" placeholder="you@company.com" autocomplete="email">
-      <button class="waitlist-btn" id="waitlist-btn" onclick="submitWaitlist()">join waitlist</button>
+    <div class="waitlist-desc">Persistent cloud sessions, automatic backups, shareable links. 7-day free trial.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1.5rem 0;text-align:left;">
+      <div style="border:1px solid var(--border);border-radius:10px;padding:1.5rem;">
+        <div style="font-size:0.78rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--dim);margin-bottom:0.5rem;">Monthly</div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-0.03em;">$20<span style="font-size:0.85rem;font-weight:400;color:var(--dim);">/mo</span></div>
+      </div>
+      <div style="border:1px solid var(--border);border-radius:10px;padding:1.5rem;">
+        <div style="font-size:0.78rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--dim);margin-bottom:0.5rem;">Annual <span style="background:var(--green-glow);color:var(--green);font-size:0.72rem;padding:0.1rem 0.4rem;border-radius:4px;">save 17%</span></div>
+        <div style="font-size:2rem;font-weight:700;letter-spacing:-0.03em;">$200<span style="font-size:0.85rem;font-weight:400;color:var(--dim);">/yr</span></div>
+      </div>
     </div>
-    <div class="waitlist-success" id="waitlist-success">You're on the list. We'll reach out when early access opens.</div>
-    <div class="waitlist-error" id="waitlist-error"></div>
-    <div class="waitlist-note">No spam. Early access only.</div>
+    <a href="https://cloud.amux.io" class="waitlist-btn" style="display:inline-block;text-decoration:none;text-align:center;width:auto;padding:0.65rem 2rem;">start free trial</a>
+    <div class="waitlist-note" style="margin-top:0.75rem;"><a href="/pricing/" style="color:var(--dim);">See full pricing details</a></div>
   </div>
 </div>
 
@@ -989,6 +995,7 @@ html[data-theme="dark"] .cta-pill-primary:hover { opacity: 0.85; }
       <div class="footer-col">
         <div class="footer-col-label">Product</div>
         <ul>
+          <li><a href="/pricing/">Pricing</a></li>
           <li><a href="/features/web-dashboard/">Dashboard</a></li>
           <li><a href="/features/self-healing/">Self-healing</a></li>
           <li><a href="/features/mobile-pwa/">Mobile PWA</a></li>
