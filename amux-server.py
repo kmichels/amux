@@ -16680,7 +16680,9 @@ function enterGridMode() {
   const ref = tabBar || document.querySelector('.header-row');
   if (ref) {
     const rect = ref.getBoundingClientRect();
-    view.style.top = rect.bottom + 'px';
+    // Add computed marginBottom to close the gap between tab bar and grid
+    const marginBottom = parseFloat(getComputedStyle(ref).marginBottom) || 0;
+    view.style.top = (rect.bottom + marginBottom) + 'px';
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
