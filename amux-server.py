@@ -10790,10 +10790,38 @@ async function doSend(name, text) {
     const author = _cloudEmail ? ` ${_cloudEmail}` : '';
     payload = `[${ts}${author}] ${text}`;
   }
-  await apiCall(API + '/api/sessions/' + name + '/send', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({text: payload})
-  });
+  // Use direct fetch (not apiCall) so we can handle 409 specifically
+  try {
+    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: payload})
+    });
+    if (r.ok) return;
+    if (r.status === 409) {
+      const d = await r.json().catch(() => ({}));
+      const msg = d.message || 'not running';
+      if (msg === 'not running') {
+        const start = await showConfirm(
+          `Session "${name}" is not running.\n\nStart it and resend?`, 'Start & Send', false);
+        if (start) {
+          await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/start', { method: 'POST' });
+          showToast('Starting ' + name + '...');
+          // Wait for session to be ready, then retry send
+          setTimeout(() => doSend(name, text), 3000);
+        }
+      } else {
+        showToast('Send failed: ' + msg);
+      }
+      return;
+    }
+    showToast('Send error: ' + r.status);
+  } catch(e) {
+    // Offline — queue it
+    _queueOp(API + '/api/sessions/' + encodeURIComponent(name) + '/send', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({text: payload})
+    });
+  }
 }
 
 async function doKeys(name, keys) {
