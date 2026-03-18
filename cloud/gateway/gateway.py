@@ -261,6 +261,7 @@ def get_db():
             stripe_customer_id TEXT,
             stripe_subscription_id TEXT,
             trial_ends_at   INTEGER,
+            api_key         TEXT,
             created_at      INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS org_memberships (
@@ -324,6 +325,12 @@ def get_db():
                 pass
             conn.commit()
             print(f"[db] migrated {len(rows)} users to orgs table", flush=True)
+    # Migrate: add api_key column if missing
+    try:
+        conn.execute("SELECT api_key FROM orgs LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE orgs ADD COLUMN api_key TEXT")
+        conn.commit()
     conn.commit()
     return conn
 
@@ -389,9 +396,62 @@ def _restore_user_files(user_id):
          "--quiet"],
         capture_output=True)
 
+def _push_org_api_key(org_id, api_key):
+    """Write the org's shared API key into the container's server.env."""
+    ctr = f"amux-user-{org_id}"
+    try:
+        # Read existing server.env from container
+        r = subprocess.run(
+            ["docker", "exec", ctr, "cat", "/root/.amux/server.env"],
+            capture_output=True, text=True)
+        lines = r.stdout.splitlines() if r.returncode == 0 else []
+        # Update or add ANTHROPIC_API_KEY
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith("ANTHROPIC_API_KEY="):
+                lines[i] = f"ANTHROPIC_API_KEY={api_key}" if api_key else ""
+                found = True
+                break
+        if not found and api_key:
+            lines.append(f"ANTHROPIC_API_KEY={api_key}")
+        content = "\n".join(l for l in lines if l.strip()) + "\n"
+        # Write back
+        subprocess.run(
+            ["docker", "exec", "-i", ctr, "sh", "-c", "cat > /root/.amux/server.env"],
+            input=content.encode(), capture_output=True)
+        # Touch amux-server.py to trigger reload
+        subprocess.run(
+            ["docker", "exec", ctr, "touch", "/app/amux-server.py"],
+            capture_output=True)
+        print(f"[org] pushed API key to {org_id}", flush=True)
+    except Exception as e:
+        print(f"[org] failed to push API key to {org_id}: {e}", flush=True)
+
 def start_container(user_id, port):
     _write_compose(user_id, port)
     _restore_user_files(user_id)
+    # Inject org API key into server.env before starting
+    try:
+        db = get_db()
+        org_row = db.execute("SELECT api_key FROM orgs WHERE id=?", (user_id,)).fetchone()
+        if org_row and org_row["api_key"]:
+            vol = f"amux-data-{user_id}"
+            # Write server.env into the volume via a temp container
+            env_content = f"ANTHROPIC_API_KEY={org_row['api_key']}\n"
+            subprocess.run(
+                ["docker", "run", "--rm", "-i", "-v", f"{vol}:/root/.amux",
+                 "alpine:latest", "sh", "-c", """
+                    # Merge org key into server.env without overwriting user keys
+                    ENV=/root/.amux/server.env
+                    if [ -f "$ENV" ] && grep -q "^ANTHROPIC_API_KEY=" "$ENV"; then
+                        true  # user already has a key, don't override
+                    else
+                        echo "ANTHROPIC_API_KEY=$1" >> "$ENV"
+                    fi
+                 """, "--", org_row["api_key"]],
+                capture_output=True)
+    except Exception as e:
+        print(f"[org] failed to inject API key for {user_id}: {e}", flush=True)
     d = _compose_dir(user_id)
     subprocess.run(["docker", "compose", "up", "-d"], cwd=d,
                    capture_output=True, check=True)
@@ -1164,9 +1224,13 @@ class Handler(BaseHTTPRequestHandler):
                 "FROM org_memberships m JOIN users u ON m.user_id = u.id "
                 "WHERE m.org_id=? ORDER BY m.joined_at", (org_id,)
             ).fetchall()
+            api_key = org["api_key"] or ""
+            masked_key = ("*" * (len(api_key) - 4) + api_key[-4:]) if len(api_key) > 8 else ("set" if api_key else "")
             return self._json({
                 "id": org["id"], "name": org["name"], "slug": org["slug"],
                 "owner_id": org["owner_id"], "plan": org["plan"],
+                "has_api_key": bool(api_key),
+                "api_key_hint": masked_key,
                 "members": [dict(m) for m in members],
             })
 
@@ -1184,11 +1248,17 @@ class Handler(BaseHTTPRequestHandler):
             if "slug" in body:
                 updates.append("slug=?")
                 params.append(body["slug"])
+            if "api_key" in body:
+                updates.append("api_key=?")
+                params.append(body["api_key"])
             if updates:
                 params.append(org_id)
                 with _db_lock:
                     db.execute(f"UPDATE orgs SET {','.join(updates)} WHERE id=?", params)
                     db.commit()
+            # If API key was updated, write it into the running container's server.env
+            if "api_key" in body:
+                _push_org_api_key(org_id, body["api_key"])
             return self._json({"ok": True})
 
         # DELETE /api/gateway/orgs/<org_id> → delete org (owner only, not personal)
