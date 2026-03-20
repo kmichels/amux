@@ -5077,6 +5077,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip:active { background: rgba(88,166,255,0.25); }
   .chip.danger { background: rgba(248,81,73,0.12); color: var(--red); border-color: rgba(248,81,73,0.25); }
   .chip.danger:active { background: rgba(248,81,73,0.25); }
+  .chip.chip-add { background: rgba(139,148,158,0.10); color: var(--dim); border-color: rgba(139,148,158,0.25); font-size: 1rem; padding: 6px 10px; }
+  .chip.chip-add:hover { background: rgba(139,148,158,0.2); color: var(--text); }
+  .chip.chip-edit-toggle { background: none; border: 1px solid transparent; color: var(--dim); padding: 6px 8px; font-size: 0.85rem; }
+  .chip.chip-edit-toggle:hover { color: var(--accent); }
+  .chip.chip-edit-toggle.active { color: var(--accent); }
+  .chips.editing .chip { cursor: grab; }
+  .chips.editing .chip.dragging { opacity: 0.4; }
+  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 4px; font-size: 0.7rem; opacity: 0.6; cursor: pointer; }
+  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); }
+  .chip-remove-btn { display: none; }
+  .chip-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; }
+  .chip-picker { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 340px; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden; }
+  .chip-picker-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .chip-picker-header input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 0.85rem; outline: none; }
+  .chip-picker-header input:focus { border-color: var(--accent); }
+  .chip-picker-body { overflow-y: auto; padding: 8px 0; max-height: 50vh; }
+  .chip-picker-section { padding: 4px 16px 2px; font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  .chip-picker-item { padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text); }
+  .chip-picker-item:hover { background: rgba(88,166,255,0.1); }
+  .chip-picker-item .cpd { color: var(--dim); font-size: 0.75rem; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .send-row { display: flex; gap: 8px; min-width: 0; overflow: visible; position: relative; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
@@ -8395,23 +8415,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
-        <div class="chips" style="width:100%;margin:0;">
-          <div class="chip" onclick="peekQuickSend('continue')">continue</div>
-          <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
-          <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
-          <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
-          <div class="chip" onclick="gitPush(peekSession,event)">&#x2B06; Push</div>
-          <div class="chip" onclick="peekQuickSend('/status')">/status</div>
-          <div class="chip" onclick="peekQuickSend('/model')">/model</div>
-          <div class="chip" onclick="peekQuickSend('/mcp')">/mcp</div>
-          <div class="chip danger" onclick="peekQuickKeys('C-c')">Ctrl+C</div>
-          <div class="chip" onclick="peekQuickKeys('C-o')">Ctrl+O</div>
-          <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
-          <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
-          <div class="chip" onclick="peekDownloadLog()" title="Download terminal log">&#128196; Log</div>
-          <div class="chip" onclick="peekShowTranscripts()" title="Conversation transcript backups">&#128190; Transcripts</div>
-          <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
-        </div>
+        <div class="chips" style="width:100%;margin:0;" id="peek-chips"></div>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
         <!-- Input row -->
@@ -9752,21 +9756,7 @@ function render() {
         ${s.preview_lines && s.preview_lines.length ? `<div class="card-preview-lines" onclick="event.stopPropagation();openPeek('${s.name}')" style="cursor:pointer;">${rewriteLocalhostUrls(s.preview_lines.map(l => esc(l)).join('\n'))}</div>` : ''}
         <div class="card-stats" id="stats-${s.name}"></div>
         ${s.running ? `
-        <div class="chips">
-          <div class="chip" onclick="doSend('${s.name}','continue')">continue</div>
-          <div class="chip" onclick="doKeys('${s.name}','Enter')">Enter</div>
-          <div class="chip" onclick="doKeys('${s.name}','Up')">&#x2191;</div>
-          <div class="chip" onclick="doKeys('${s.name}','Down')">&#x2193;</div>
-          <div class="chip" onclick="gitPush('${s.name}',event)">&#x2B06; Push</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/status')">/status</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/model')">/model</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/mcp')">/mcp</div>
-          <div class="chip danger" onclick="doKeys('${s.name}','C-c')">Ctrl+C</div>
-          <div class="chip" onclick="doKeys('${s.name}','C-o')">Ctrl+O</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/clear')">/clear</div>
-          <div class="chip" onclick="chipToInput('${s.name}','/compact')">/compact</div>
-          <div class="chip" onclick="doKeys('${s.name}','Escape')">Esc</div>
-        </div>
+        <div class="chips" id="card-chips-${s.name}"></div>
         <div class="send-row" style="position:relative;">
           <div id="card-ac-${s.name}" class="ac-list slash-ac"></div>
           <textarea class="send-input" id="input-${s.name}" rows="1"
@@ -9794,6 +9784,12 @@ function render() {
     if (focusedId) { const inp = document.getElementById(focusedId); if (inp) { inp.focus({ preventScroll: true }); const d = savedInputs[focusedId]; if (d && inp.tagName === 'TEXTAREA') { inp.selectionStart = d.start; inp.selectionEnd = d.end; } } }
     _renderArchivedSection();
     requestAnimationFrame(initSortable);
+    requestAnimationFrame(() => {
+      document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+        const name = el.id.replace('card-chips-', '');
+        if (name) renderChips(el, name, false);
+      });
+    });
     return;
   }
 
@@ -9882,6 +9878,14 @@ function render() {
   }
 
   _renderArchivedSection();
+
+  // Hydrate customizable chip bars on all session cards
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+      const name = el.id.replace('card-chips-', '');
+      if (name) renderChips(el, name, false);
+    });
+  });
 }
 
 
@@ -12088,6 +12092,236 @@ const SLASH_COMMANDS = [
   { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
   { cmd: '/amux-board', desc: 'Add a task or note to the board' },
 ];
+
+// ── Customizable chip bar ──
+// Each chip: { id, label, action, value, danger? }
+// action: 'send' (text), 'keys' (keystroke), 'slash' (populate input), 'special' (named fn)
+const DEFAULT_CHIPS = [
+  { id: 'continue', label: 'continue', action: 'send', value: 'continue' },
+  { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter' },
+  { id: 'up', label: '\u2191', action: 'keys', value: 'Up' },
+  { id: 'down', label: '\u2193', action: 'keys', value: 'Down' },
+  { id: 'push', label: '\u2B06 Push', action: 'special', value: 'gitPush' },
+  { id: 'status', label: '/status', action: 'slash', value: '/status' },
+  { id: 'model', label: '/model', action: 'slash', value: '/model' },
+  { id: 'mcp', label: '/mcp', action: 'slash', value: '/mcp' },
+  { id: 'ctrlc', label: 'Ctrl+C', action: 'keys', value: 'C-c', danger: true },
+  { id: 'ctrlo', label: 'Ctrl+O', action: 'keys', value: 'C-o' },
+  { id: 'clear', label: '/clear', action: 'slash', value: '/clear' },
+  { id: 'compact', label: '/compact', action: 'slash', value: '/compact' },
+  { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape' },
+];
+
+// All possible chips the user can add
+const ALL_CHIPS = [
+  // Built-in actions
+  { section: 'Actions', items: [
+    { id: 'continue', label: 'continue', action: 'send', value: 'continue', desc: 'Send "continue"' },
+    { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter', desc: 'Press Enter' },
+    { id: 'up', label: '\u2191', action: 'keys', value: 'Up', desc: 'Arrow Up' },
+    { id: 'down', label: '\u2193', action: 'keys', value: 'Down', desc: 'Arrow Down' },
+    { id: 'push', label: '\u2B06 Push', action: 'special', value: 'gitPush', desc: 'Git push' },
+    { id: 'ctrlc', label: 'Ctrl+C', action: 'keys', value: 'C-c', desc: 'Interrupt', danger: true },
+    { id: 'ctrlo', label: 'Ctrl+O', action: 'keys', value: 'C-o', desc: 'Accept & continue' },
+    { id: 'esc', label: 'Esc', action: 'keys', value: 'Escape', desc: 'Escape' },
+    { id: 'tab', label: 'Tab', action: 'keys', value: 'Tab', desc: 'Tab key' },
+    { id: 'yes', label: 'Yes', action: 'send', value: 'yes', desc: 'Send "yes"' },
+    { id: 'no', label: 'No', action: 'send', value: 'no', desc: 'Send "no"' },
+    { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
+    { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
+  ]},
+];
+// Add slash commands section from SLASH_COMMANDS
+ALL_CHIPS.push({
+  section: 'Slash Commands',
+  items: SLASH_COMMANDS.map(c => ({
+    id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
+  }))
+});
+
+let _chipEditing = false;
+let _chipDragIdx = -1;
+
+function _loadChips() {
+  try {
+    const raw = localStorage.getItem('amux_chips');
+    if (raw) return JSON.parse(raw);
+  } catch(e) {}
+  return null;
+}
+function _saveChips(chips) {
+  localStorage.setItem('amux_chips', JSON.stringify(chips));
+}
+function _getChips() {
+  return _loadChips() || DEFAULT_CHIPS.map(c => ({...c}));
+}
+
+function _chipAction(chip, sessionName, isPeek) {
+  if (chip.action === 'send') {
+    if (isPeek) peekQuickSend(chip.value);
+    else doSend(sessionName, chip.value);
+  } else if (chip.action === 'keys') {
+    if (isPeek) peekQuickKeys(chip.value);
+    else doKeys(sessionName, chip.value);
+  } else if (chip.action === 'slash') {
+    if (isPeek) {
+      const inp = document.getElementById('peek-cmd-input');
+      if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); slashAcUpdate(); }
+    } else {
+      chipToInput(sessionName, chip.value);
+    }
+  } else if (chip.action === 'special') {
+    if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
+    else if (chip.value === 'downloadLog' && isPeek) peekDownloadLog();
+    else if (chip.value === 'showTranscripts' && isPeek) peekShowTranscripts();
+  }
+}
+
+function renderChips(container, sessionName, isPeek) {
+  const chips = _getChips();
+  let html = '';
+  chips.forEach((chip, i) => {
+    const cls = chip.danger ? 'chip danger' : 'chip';
+    const drag = _chipEditing ? 'draggable="true"' : '';
+    html += '<div class="' + cls + '" ' + drag + ' data-chip-idx="' + i + '"'
+      + ' onclick="_chipAction(_getChips()[' + i + '],\'' + esc(sessionName || '') + '\',' + !!isPeek + ')">'
+      + esc(chip.label)
+      + (_chipEditing ? '<span class="chip-remove-btn" onclick="event.stopPropagation();removeChip(' + i + ')">\u00D7</span>' : '')
+      + '</div>';
+  });
+  // Add button
+  html += '<div class="chip chip-add" onclick="openChipPicker()">+</div>';
+  // Edit toggle
+  html += '<div class="chip chip-edit-toggle' + (_chipEditing ? ' active' : '') + '" onclick="toggleChipEdit()">'
+    + (_chipEditing ? '\u2713' : '\u270E') + '</div>';
+  container.innerHTML = html;
+  if (_chipEditing) {
+    container.classList.add('editing');
+    _setupChipDrag(container, sessionName, isPeek);
+  } else {
+    container.classList.remove('editing');
+  }
+}
+
+function _setupChipDrag(container) {
+  const draggables = container.querySelectorAll('.chip[draggable]');
+  draggables.forEach(el => {
+    el.addEventListener('dragstart', e => {
+      _chipDragIdx = parseInt(el.dataset.chipIdx);
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      _chipDragIdx = -1;
+    });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('drop', e => {
+      e.preventDefault();
+      const toIdx = parseInt(el.dataset.chipIdx);
+      if (_chipDragIdx < 0 || _chipDragIdx === toIdx) return;
+      const chips = _getChips();
+      const [moved] = chips.splice(_chipDragIdx, 1);
+      chips.splice(toIdx, 0, moved);
+      _saveChips(chips);
+      refreshAllChipBars();
+    });
+  });
+}
+
+function toggleChipEdit() {
+  _chipEditing = !_chipEditing;
+  refreshAllChipBars();
+}
+
+function removeChip(idx) {
+  const chips = _getChips();
+  chips.splice(idx, 1);
+  _saveChips(chips);
+  refreshAllChipBars();
+}
+
+function addChip(chip) {
+  const chips = _getChips();
+  // Don't add if already present with same id
+  if (chips.find(c => c.id === chip.id)) return;
+  chips.push({ id: chip.id, label: chip.label, action: chip.action, value: chip.value, danger: chip.danger || false });
+  _saveChips(chips);
+  refreshAllChipBars();
+}
+
+function openChipPicker() {
+  const existing = _getChips();
+  const existingIds = new Set(existing.map(c => c.id));
+  let html = '<div class="chip-picker-overlay" onclick="if(event.target===this)closeChipPicker()">'
+    + '<div class="chip-picker">'
+    + '<div class="chip-picker-header"><input id="chip-picker-search" placeholder="Search commands..." oninput="filterChipPicker()"></div>'
+    + '<div class="chip-picker-body" id="chip-picker-body">';
+  ALL_CHIPS.forEach(sec => {
+    html += '<div class="chip-picker-section">' + esc(sec.section) + '</div>';
+    sec.items.forEach(item => {
+      const added = existingIds.has(item.id);
+      html += '<div class="chip-picker-item' + (added ? ' added' : '') + '" data-search="' + esc((item.label + ' ' + item.desc + ' ' + item.value).toLowerCase()) + '"'
+        + ' onclick="' + (added ? '' : 'addChipFromPicker(this)') + '"'
+        + ' data-chip=\'' + esc(JSON.stringify({id:item.id,label:item.label,action:item.action,value:item.value,danger:item.danger||false})) + '\'>'
+        + '<span>' + esc(item.label) + '</span>'
+        + '<span class="cpd">' + esc(item.desc || '') + '</span>'
+        + (added ? '<span style="color:var(--dim);font-size:0.75rem;">\u2713</span>' : '')
+        + '</div>';
+    });
+  });
+  html += '</div></div></div>';
+  const div = document.createElement('div');
+  div.id = 'chip-picker-wrap';
+  div.innerHTML = html;
+  document.body.appendChild(div);
+  setTimeout(() => document.getElementById('chip-picker-search')?.focus(), 50);
+}
+
+function closeChipPicker() {
+  document.getElementById('chip-picker-wrap')?.remove();
+}
+
+function filterChipPicker() {
+  const q = (document.getElementById('chip-picker-search')?.value || '').toLowerCase();
+  document.querySelectorAll('.chip-picker-item').forEach(el => {
+    el.style.display = el.dataset.search.includes(q) ? '' : 'none';
+  });
+  // Hide section headers with no visible items
+  document.querySelectorAll('.chip-picker-section').forEach(sec => {
+    let next = sec.nextElementSibling;
+    let anyVisible = false;
+    while (next && !next.classList.contains('chip-picker-section')) {
+      if (next.style.display !== 'none') anyVisible = true;
+      next = next.nextElementSibling;
+    }
+    sec.style.display = anyVisible ? '' : 'none';
+  });
+}
+
+function addChipFromPicker(el) {
+  try {
+    const chip = JSON.parse(el.dataset.chip);
+    addChip(chip);
+    closeChipPicker();
+  } catch(e) {}
+}
+
+function refreshAllChipBars() {
+  // Refresh peek chip bar
+  const peekChips = document.querySelector('#peek-cmd-row > .chips');
+  if (peekChips) renderChips(peekChips, '', true);
+  // Refresh all card chip bars
+  document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
+    const name = el.id.replace('card-chips-', '');
+    if (name) renderChips(el, name, false);
+  });
+}
+// Initialize peek chip bar now that renderChips is defined
+(function(){ var c = document.getElementById('peek-chips'); if (c) renderChips(c, '', true); })();
 let slashAcItems = [];
 let slashAcSelected = -1;
 
