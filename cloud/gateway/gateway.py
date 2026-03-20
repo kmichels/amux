@@ -151,6 +151,79 @@ _LOGIN_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# ── Upgrade HTML (trial expired) ───────────────────────────────────────────────
+_UPGRADE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Upgrade — amux cloud</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0a; color: #e5e5e5;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .wrap { max-width: 480px; width: 90%; text-align: center; }
+    .logo { font-size: 1.4rem; font-weight: 700; color: #fff; margin-bottom: 32px; }
+    .logo span { color: #555; font-weight: 400; }
+    h1 { font-size: 1.3rem; margin-bottom: 8px; }
+    p { color: #888; font-size: 0.88rem; margin-bottom: 28px; line-height: 1.5; }
+    .plans { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
+    .plan { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px;
+      text-align: left; }
+    .plan.featured { border-color: #7c6fcd; }
+    .plan h3 { font-size: 1rem; margin-bottom: 4px; }
+    .plan .price { color: #aaa; font-size: 0.82rem; margin-bottom: 12px; }
+    .plan .save { color: #3fb950; font-size: 0.75rem; font-weight: 600; }
+    .plan .features { color: #888; font-size: 0.78rem; margin-bottom: 14px; }
+    .btn { display: inline-block; background: #7c6fcd; color: #fff; border: none;
+      border-radius: 8px; padding: 10px 24px; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer; width: 100%; }
+    .btn:hover { background: #9b8ee0; }
+    .logout { color: #555; font-size: 0.78rem; margin-top: 16px; }
+    .logout a { color: #888; text-decoration: underline; text-underline-offset: 3px; }
+    #error { color: #f87171; font-size: 0.82rem; margin-top: 8px; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">amux <span>cloud</span></div>
+    <h1>Your free trial has ended</h1>
+    <p>Subscribe to keep using your workspace. All your sessions and data are safe.</p>
+    <div class="plans">
+      <div class="plan">
+        <h3>Pro Monthly</h3>
+        <div class="price">$20/month</div>
+        <div class="features">Unlimited sessions &middot; No idle timeout &middot; Team workspaces</div>
+        <button class="btn" onclick="checkout('monthly')">Subscribe monthly</button>
+      </div>
+      <div class="plan featured">
+        <h3>Pro Annual <span class="save">save 17%</span></h3>
+        <div class="price">$200/year ($16.67/mo)</div>
+        <div class="features">Unlimited sessions &middot; No idle timeout &middot; Team workspaces</div>
+        <button class="btn" onclick="checkout('annual')">Subscribe annually</button>
+      </div>
+    </div>
+    <div id="error"></div>
+    <div class="logout"><a href="/api/cloud-logout">Log out</a></div>
+  </div>
+  <script>
+    async function checkout(billing) {
+      document.getElementById('error').textContent = '';
+      try {
+        const r = await fetch('/api/stripe/checkout', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ billing })
+        });
+        const d = await r.json();
+        if (d.url) location.href = d.url;
+        else document.getElementById('error').textContent = d.error || 'Failed to start checkout';
+      } catch(e) { document.getElementById('error').textContent = 'Connection error'; }
+    }
+  </script>
+</body>
+</html>"""
+
 # ── Invite accept HTML ─────────────────────────────────────────────────────────
 _INVITE_ACCEPT_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -325,6 +398,13 @@ def get_db():
         except sqlite3.OperationalError:
             pass
         conn.commit()
+    # Backfill trial_ends_at for existing free orgs that don't have one
+    conn.execute(
+        "UPDATE orgs SET trial_ends_at = created_at + ? WHERE plan = 'free' AND trial_ends_at IS NULL",
+        (TRIAL_DAYS * 86400,))
+    conn.execute(
+        "UPDATE users SET trial_ends_at = created_at + ? WHERE plan = 'free' AND trial_ends_at IS NULL",
+        (TRIAL_DAYS * 86400,))
     conn.commit()
     return conn
 
@@ -948,23 +1028,24 @@ class Handler(BaseHTTPRequestHandler):
                 email = client_email or _clerk_get_email(user_id)
             db = get_db()
             now = int(time.time())
+            trial_end = now + TRIAL_DAYS * 86400
             with _db_lock:
                 row = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
                 if not row:
-                    # New user — open signup
+                    # New user — open signup with free trial
                     port = alloc_port(db)
                     db.execute(
-                        "INSERT INTO users (id, email, plan, port, created_at, last_seen) VALUES (?,?,?,?,?,?)",
-                        (user_id, email, "free", port, now, now))
+                        "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at) VALUES (?,?,?,?,?,?,?)",
+                        (user_id, email, "free", port, now, now, trial_end))
                     # Create personal org (id = user_id for Docker volume compat)
                     db.execute(
-                        "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
-                        (user_id, email or user_id, None, user_id, port, "free", now))
+                        "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, trial_ends_at, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                        (user_id, email or user_id, None, user_id, port, "free", trial_end, now))
                     db.execute(
                         "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
                         (user_id, user_id, "owner", now))
                     db.commit()
-                    print(f"[signup] new user {email} ({user_id})", flush=True)
+                    print(f"[signup] new user {email} ({user_id}) trial_ends={trial_end}", flush=True)
                 else:
                     db.execute("UPDATE users SET last_seen=?, email=? WHERE id=?",
                                (now, email, user_id))
@@ -1025,16 +1106,17 @@ class Handler(BaseHTTPRequestHandler):
         # Upsert user
         db = get_db()
         now = int(time.time())
+        trial_end_upsert = now + TRIAL_DAYS * 86400
         with _db_lock:
             row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not row:
                 port = alloc_port(db)
                 db.execute(
-                    "INSERT INTO users (id, email, plan, port, created_at, last_seen) VALUES (?,?,?,?,?,?)",
-                    (user_id, email, "free", port, now, now))
+                    "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at) VALUES (?,?,?,?,?,?,?)",
+                    (user_id, email, "free", port, now, now, trial_end_upsert))
                 db.execute(
-                    "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
-                    (user_id, email or user_id, None, user_id, port, "free", now))
+                    "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, trial_ends_at, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (user_id, email or user_id, None, user_id, port, "free", trial_end_upsert, now))
                 db.execute(
                     "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
                     (user_id, user_id, "owner", now))
@@ -1271,6 +1353,8 @@ class Handler(BaseHTTPRequestHandler):
                     if os.path.isdir(d):
                         subprocess.run(["docker", "compose", "down", "--remove-orphans", "-v"],
                                        cwd=d, capture_output=True, timeout=30)
+                        import shutil
+                        shutil.rmtree(d, ignore_errors=True)
                 except Exception as e:
                     print(f"[docker] failed to tear down {org_id}: {e}", flush=True)
                 with _db_lock:
@@ -1534,11 +1618,24 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── Determine target container via active org ─────────────────────────
         active_org = _active_org_id()
-        org_data = db.execute("SELECT id, port FROM orgs WHERE id=?", (active_org,)).fetchone()
+        org_data = db.execute("SELECT id, port, plan, trial_ends_at FROM orgs WHERE id=?", (active_org,)).fetchone()
         if not org_data or not org_data["port"]:
             return self._json({"error": "workspace not found"}, 404)
         target_org_id = org_data["id"]
         target_port = org_data["port"]
+
+        # ── Hard gate: block expired free-plan users ─────────────────────────
+        # Allow through: pro users, users still in trial, billing/gateway API calls, admins
+        if org_data["plan"] != "pro" and not (ADMIN_EMAILS and user_email in ADMIN_EMAILS):
+            trial_end = org_data["trial_ends_at"] or 0
+            if trial_end < now:
+                # Trial expired — allow only billing and gateway endpoints
+                _allowed_prefixes = ("/api/stripe/", "/api/gateway/", "/api/cloud-")
+                if not any(path.startswith(p) for p in _allowed_prefixes):
+                    accept = self.headers.get("Accept", "")
+                    if "text/html" in accept or not path.startswith("/api/"):
+                        return self._html(_UPGRADE_HTML)
+                    return self._json({"error": "trial_expired", "upgrade_url": "/upgrade"}, 402)
 
         # Refresh user's last_seen
         db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, user_id))
