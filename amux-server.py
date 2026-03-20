@@ -6011,8 +6011,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
     display: flex; align-items: center; flex-shrink: 0; }
   .peek-attach-btn:hover { color: var(--text); border-color: var(--accent); }
-  .peek-attach-btn.mic-active { color: var(--red); border-color: var(--red); animation: mic-pulse 1s ease-in-out infinite; }
-  @keyframes mic-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   /* Drag-over overlay */
   #peek-overlay.drag-over { outline: 2px dashed var(--accent); outline-offset: -3px; }
   #peek-overlay.drag-over .peek-drag-hint {
@@ -6497,6 +6495,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.12); }
   .board-drag-handle:active { cursor: grabbing; }
   @media (hover: none) { .board-drag-handle { opacity: 0.5; width: 32px; height: 32px; cursor: grab; } }
+  /* ── Board mobile responsive ── */
+  .board-new-btn { font-size: 0.8rem; padding: 5px 12px; white-space: nowrap; flex-shrink: 0; }
+  .board-new-icon { display: none; }
+  @media (max-width: 640px) {
+    .board-toolbar { flex-wrap: wrap; gap: 6px; }
+    .board-search-wrap { order: 1; flex: 1 1 100% !important; min-width: 0; }
+    .board-new-btn { order: 2; padding: 6px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
+    .board-new-label { display: none; }
+    .board-new-icon { display: inline; font-size: 1.1rem; font-weight: 700; line-height: 1; }
+    .board-owner-toggle { order: 3; flex: 1; }
+    .board-owner-toggle .bv-btn { flex: 1; text-align: center; font-size: 0.78rem; padding: 6px 4px; }
+    .board-view-toggle { order: 4; }
+    .board-view-toggle .bv-btn { padding: 6px 8px; }
+    .board-col { min-width: 160px; max-width: 280px; padding: 8px 6px; }
+    .board-columns { gap: 8px; min-height: 160px; }
+    .board-card { padding: 8px 10px; }
+    .board-card-title { font-size: 0.82rem; }
+    .board-card-desc { font-size: 0.7rem; }
+    .board-card-footer { gap: 4px; }
+    .board-card-footer span { font-size: 0.62rem !important; }
+    .board-card-key { font-size: 0.58rem; }
+    .board-filter-chip { font-size: 0.68rem; padding: 2px 8px; }
+    .board-session-items { padding: 0 2px 4px 12px; }
+    .board-session-name { font-size: 0.78rem; }
+    .board-session-count { font-size: 0.62rem !important; padding: 1px 5px !important; }
+  }
+  @media (max-width: 400px) {
+    .board-col { min-width: 140px; max-width: 260px; }
+    .board-card { padding: 7px 8px; }
+    .board-card-title { font-size: 0.78rem; }
+    .board-col-header { font-size: 0.66rem; padding: 2px 2px 6px 2px; }
+    .board-owner-toggle .bv-btn { font-size: 0.72rem; }
+  }
   .board-card.card-enter { animation: cardEnter 0.3s cubic-bezier(.4,0,.2,1) both; }
   .board-card.card-flip { transition: transform 0.35s cubic-bezier(.4,0,.2,1); }
   @keyframes cardEnter {
@@ -7795,7 +7826,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="board-search" class="search-input" type="text" placeholder="Search board..." oninput="boardSearchQuery=this.value.toLowerCase();renderBoard()">
       <button class="search-clear" onclick="document.getElementById('board-search').value='';boardSearchQuery='';renderBoard()">&#x2715;</button>
     </div>
-    <button class="btn primary" onclick="openBoardAdd('todo')" style="font-size:0.8rem;padding:5px 12px;white-space:nowrap;flex-shrink:0;">+ New issue</button>
+    <button class="btn primary board-new-btn" onclick="openBoardAdd('todo')"><span class="board-new-label">+ New issue</span><span class="board-new-icon">+</span></button>
     <div class="board-owner-toggle">
       <button id="bo-human" class="bv-btn" onclick="setBoardOwner('human')" title="Human issues">Human</button>
       <button id="bo-agent" class="bv-btn" onclick="setBoardOwner('agent')" title="Session issues">Sessions</button>
@@ -8555,7 +8586,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input type="file" id="peek-file-input" multiple
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
-        <button id="peek-mic-btn" class="peek-attach-btn" title="Dictate" onclick="toggleMic()" style="display:none;">&#127908;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
