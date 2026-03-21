@@ -130,6 +130,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
 
     // In WKWebView/PWA, window.open popups silently fail (Clerk OAuth uses popups).
     // Override to navigate in-place — OAuth callback will redirect back here.
+    // Also hide Google OAuth button — Google blocks sign-in from embedded webviews.
     (function() {
       const isNative = /AmuxApp/.test(navigator.userAgent);
       const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
@@ -140,6 +141,10 @@ _LOGIN_HTML = """<!DOCTYPE html>
           if (url) window.location.href = url;
           return null;
         };
+        // Hide Google OAuth (blocked in embedded webviews by Google policy)
+        const style = document.createElement('style');
+        style.textContent = '.cl-socialButtonsIconButton__google, .cl-socialButtonsBlockButton__google { display: none !important; }';
+        document.head.appendChild(style);
       }
     })();
 
