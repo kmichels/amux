@@ -1101,23 +1101,26 @@ if (demoBtn) demoBtn.addEventListener('click', function() {
 function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
 document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
 
-// Cloud waitlist
-document.getElementById('waitlist-email').addEventListener('keydown', function(e) {
-  if (e.key === 'Enter') submitWaitlist();
-});
+// Cloud waitlist (only if elements exist)
+var _wlEmail = document.getElementById('waitlist-email');
+if (_wlEmail) {
+  _wlEmail.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') submitWaitlist();
+  });
+}
 function submitWaitlist() {
   var emailEl = document.getElementById('waitlist-email');
   var btn = document.getElementById('waitlist-btn');
   var success = document.getElementById('waitlist-success');
   var error = document.getElementById('waitlist-error');
+  if (!emailEl || !btn) return;
   var email = emailEl.value.trim();
   if (!email || email.indexOf('@') === -1) {
-    error.textContent = 'Please enter a valid email address.';
-    error.style.display = 'block';
+    if (error) { error.textContent = 'Please enter a valid email address.'; error.style.display = 'block'; }
     return;
   }
   btn.disabled = true;
-  error.style.display = 'none';
+  if (error) error.style.display = 'none';
   fetch('https://formspree.io/f/xgolboon', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -1125,14 +1128,14 @@ function submitWaitlist() {
   }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
     .then(function(res) {
       if (res.ok) {
-        document.getElementById('waitlist-form').style.display = 'none';
-        success.style.display = 'block';
+        var form = document.getElementById('waitlist-form');
+        if (form) form.style.display = 'none';
+        if (success) success.style.display = 'block';
       } else {
         throw new Error((res.d.errors || [{}])[0].message || 'Request failed');
       }
     }).catch(function(e) {
-      error.textContent = e.message || 'Something went wrong. Please try again.';
-      error.style.display = 'block';
+      if (error) { error.textContent = e.message || 'Something went wrong. Please try again.'; error.style.display = 'block'; }
       btn.disabled = false;
     });
 }
