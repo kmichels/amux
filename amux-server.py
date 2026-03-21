@@ -193,34 +193,57 @@ def _aria2_list_all():
     return result
 
 
-# ── Browser automation helpers ────────────────────────────────────────────────
-_BROWSER_HELPER = Path.home() / ".amux" / "browser-helper.js"
-_NODE_BIN = shutil.which("node") or "/usr/local/bin/node"
+# ── Browser automation helpers (browser-use CLI) ─────────────────────────────
+_BROWSER_USE_BIN = shutil.which("browser-use") or "/usr/local/bin/browser-use"
 
-def _pw_list_profiles() -> list:
-    d = Path.home() / ".amux" / "playwright-auth" / "profiles"
-    if not d.exists():
-        return []
-    return sorted(p.name for p in d.iterdir() if p.is_dir())
-
-def _browser_call(cmd: dict, timeout_s: int = 40) -> dict:
-    """Run ~/.amux/browser-helper.js with a JSON command, return parsed result."""
+def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
+    """Run a browser-use CLI command, return parsed JSON result."""
+    cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
     try:
-        r = subprocess.run(
-            [_NODE_BIN, str(_BROWSER_HELPER)],
-            input=json.dumps(cmd),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         out = r.stdout.strip()
         if not out:
-            return {"error": r.stderr.strip() or f"node exited {r.returncode}"}
+            return {"error": r.stderr.strip() or f"browser-use exited {r.returncode}"}
         return json.loads(out)
     except subprocess.TimeoutExpired:
         return {"error": "browser operation timed out"}
+    except json.JSONDecodeError:
+        return {"error": r.stdout.strip()[:200] if r.stdout else "invalid JSON"}
     except Exception as e:
         return {"error": str(e)}
+
+def _bu_list_profiles() -> list:
+    """List available Chrome profiles via browser-use."""
+    try:
+        r = subprocess.run(
+            [_BROWSER_USE_BIN, "-b", "real", "profile", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        profiles = []
+        for line in r.stdout.strip().splitlines():
+            line = line.strip()
+            if line.startswith("Local Chrome") or not line:
+                continue
+            # Format: "Profile 11: Ethan (email@example.com)"
+            if ":" in line:
+                name = line.split(":")[0].strip()
+                profiles.append(name)
+        return profiles
+    except Exception:
+        return []
+
+def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
+    """Take a screenshot, return {path, size}."""
+    dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    result = _bu_call(["screenshot", dest], session=session)
+    if result.get("success"):
+        try:
+            size = Path(dest).stat().st_size
+        except Exception:
+            size = 0
+        return {"path": dest, "size": size}
+    return result
 
 # SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
 _sse_cache = {
@@ -8264,13 +8287,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="vp-container" style="position:relative;width:90vw;max-width:1200px;">
     <div id="vp-title" style="color:#fff;font-size:0.85rem;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
     <div style="position:relative;background:#000;border-radius:8px;overflow:hidden;">
-      <video id="video-player" playsinline x-webkit-airplay="allow" airplay="allow" style="width:100%;max-height:75vh;display:block;"></video>
+      <video id="video-player" playsinline webkit-playsinline x-webkit-airplay="allow" airplay="allow" preload="metadata" style="width:100%;max-height:75vh;display:block;"></video>
+      <!-- Loading/error overlay -->
+      <div id="vp-status" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;color:#fff;font-size:0.9rem;background:rgba(0,0,0,0.6);pointer-events:none;z-index:2;"></div>
       <!-- Custom controls -->
-      <div id="vp-controls" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.85));padding:12px 16px 10px;display:flex;flex-direction:column;gap:6px;opacity:1;transition:opacity 0.3s;">
+      <div id="vp-controls" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.85));padding:12px 16px 10px;display:flex;flex-direction:column;gap:6px;opacity:1;transition:opacity 0.3s;z-index:3;">
         <!-- Progress bar -->
-        <div id="vp-progress-wrap" style="position:relative;height:6px;background:rgba(255,255,255,0.15);border-radius:3px;cursor:pointer;" onclick="_vpSeek(event)" onmousemove="_vpHoverTime(event)" onmouseleave="_vpHoverHide()">
-          <div id="vp-buffer" style="position:absolute;height:100%;background:rgba(255,255,255,0.25);border-radius:3px;pointer-events:none;"></div>
-          <div id="vp-played" style="position:absolute;height:100%;background:var(--accent);border-radius:3px;pointer-events:none;"></div>
+        <div id="vp-progress-wrap" style="position:relative;height:8px;background:rgba(255,255,255,0.15);border-radius:4px;cursor:pointer;touch-action:none;" onclick="_vpSeek(event)" onmousemove="_vpHoverTime(event)" onmouseleave="_vpHoverHide()">
+          <div id="vp-buffer" style="position:absolute;height:100%;background:rgba(255,255,255,0.25);border-radius:4px;pointer-events:none;"></div>
+          <div id="vp-played" style="position:absolute;height:100%;background:var(--accent);border-radius:4px;pointer-events:none;"></div>
           <div id="vp-hover-time" style="display:none;position:absolute;top:-28px;background:rgba(0,0,0,0.8);color:#fff;font-size:0.7rem;padding:2px 6px;border-radius:3px;transform:translateX(-50%);pointer-events:none;"></div>
         </div>
         <!-- Buttons row -->
@@ -8278,7 +8303,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <button id="vp-play" onclick="_vpTogglePlay()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer;padding:0;width:24px;">&#x25B6;</button>
           <span id="vp-time" style="color:rgba(255,255,255,0.7);font-size:0.75rem;font-family:'JetBrains Mono',monospace;min-width:100px;">0:00 / 0:00</span>
           <div style="flex:1;"></div>
-          <div style="display:flex;align-items:center;gap:4px;">
+          <button id="vp-pip" onclick="_vpPiP()" style="background:none;border:none;color:#fff;font-size:0.85rem;cursor:pointer;padding:0;display:none;" title="Picture-in-Picture">&#x1F5BC;</button>
+          <button id="vp-airplay" onclick="_vpAirPlay()" style="background:none;border:none;color:#fff;font-size:0.85rem;cursor:pointer;padding:0;display:none;" title="AirPlay">&#x1F4E1;</button>
+          <div id="vp-volume-wrap" style="display:flex;align-items:center;gap:4px;">
             <button id="vp-mute" onclick="_vpToggleMute()" style="background:none;border:none;color:#fff;font-size:0.9rem;cursor:pointer;padding:0;">&#x1F50A;</button>
             <input id="vp-volume" type="range" min="0" max="1" step="0.05" value="1" oninput="_vpSetVolume(this.value)" style="width:70px;accent-color:var(--accent);cursor:pointer;">
           </div>
@@ -19591,39 +19618,66 @@ let _vpHideTimer = null;
 
 function _vpPosKey(url) { return 'amux_vp_pos_' + url; }
 
+function _vpMimeFromUrl(url) {
+  const ext = url.split('?')[0].split('.').pop().toLowerCase();
+  const map = { mp4:'video/mp4', m4v:'video/mp4', mov:'video/quicktime', webm:'video/webm', mkv:'video/x-matroska', avi:'video/x-msvideo' };
+  return map[ext] || 'video/mp4';
+}
+
 function _playVideoUrl(url, title) {
   const v = document.getElementById('video-player');
+  const status = document.getElementById('vp-status');
+
   v.src = url;
   v._vpUrl = url;
+
   document.getElementById('vp-title').textContent = title || url.split('/').pop();
   document.getElementById('video-overlay').style.display = 'flex';
+
+  // Show loading state
+  status.style.display = 'flex';
+  status.textContent = 'Loading...';
+
+  // Show AirPlay button if Safari supports it
+  const airBtn = document.getElementById('vp-airplay');
+  if (airBtn) airBtn.style.display = (v.webkitShowPlaybackTargetPicker) ? '' : 'none';
+  // Show PiP button if supported
+  const pipBtn = document.getElementById('vp-pip');
+  if (pipBtn) pipBtn.style.display = (document.pictureInPictureEnabled || v.webkitSupportsPresentationMode) ? '' : 'none';
+
   const key = _vpPosKey(url);
-  const raw = localStorage.getItem(key);
-  const saved = parseFloat(raw);
-  console.log('[VP] _playVideoUrl url=' + url);
-  console.log('[VP] _playVideoUrl posKey=' + key);
-  console.log('[VP] _playVideoUrl raw saved=' + raw + ', parsed=' + saved);
+  const saved = parseFloat(localStorage.getItem(key));
   if (saved > 0) {
-    const doSeek = () => {
-      console.log('[VP] loadedmetadata fired, seeking to ' + saved + ' (readyState=' + v.readyState + ')');
-      v.currentTime = saved;
-      v.removeEventListener('loadedmetadata', doSeek);
-    };
-    if (v.readyState >= 1) {
-      console.log('[VP] readyState already ' + v.readyState + ', seeking immediately to ' + saved);
-      v.currentTime = saved;
-    } else {
-      console.log('[VP] readyState=' + v.readyState + ', waiting for loadedmetadata');
-      v.addEventListener('loadedmetadata', doSeek);
-    }
-  } else {
-    console.log('[VP] no saved position, starting from 0');
+    const doSeek = () => { v.currentTime = saved; v.removeEventListener('loadedmetadata', doSeek); };
+    if (v.readyState >= 1) v.currentTime = saved;
+    else v.addEventListener('loadedmetadata', doSeek);
   }
+
+  // Hide loading when playback is ready
+  const hideLoading = () => { status.style.display = 'none'; v.removeEventListener('canplay', hideLoading); v.removeEventListener('playing', hideLoading); };
+  v.addEventListener('canplay', hideLoading);
+  v.addEventListener('playing', hideLoading);
+  // Fallback: if already ready, hide immediately
+  if (v.readyState >= 3) hideLoading();
+
+  // Error handling
+  v.onerror = () => {
+    const err = v.error;
+    let msg = 'Cannot play this video';
+    if (err) {
+      if (err.code === 4) msg = 'Format not supported by this browser';
+      else if (err.code === 2) msg = 'Network error loading video';
+      else if (err.code === 3) msg = 'Video decode error';
+    }
+    status.style.display = 'flex';
+    status.textContent = msg;
+  };
+
   v.play().catch(() => {});
   _vpStartLoop();
   _vpShowControls();
-  v.onpause = () => { console.log('[VP] onpause, saving pos'); _vpSavePos(v); };
-  v.onseeked = () => { console.log('[VP] onseeked, saving pos'); _vpSavePos(v); };
+  v.onpause = () => _vpSavePos(v);
+  v.onseeked = () => _vpSavePos(v);
 }
 
 function _playVideo(gid, encodedPath) {
@@ -19633,28 +19687,23 @@ function _playVideo(gid, encodedPath) {
 }
 
 function _vpSavePos(v) {
-  if (!v._vpUrl || !v.currentTime) {
-    console.log('[VP] _vpSavePos skip: url=' + !!v._vpUrl + ' currentTime=' + v.currentTime);
-    return;
-  }
-  // Clear saved pos if near the end (within 10s)
+  if (!v._vpUrl || !v.currentTime) return;
   if (v.duration && v.currentTime > v.duration - 10) {
-    console.log('[VP] _vpSavePos near-end, clearing (' + v.currentTime.toFixed(1) + '/' + v.duration.toFixed(1) + ')');
     localStorage.removeItem(_vpPosKey(v._vpUrl));
   } else {
-    console.log('[VP] _vpSavePos saving ' + v.currentTime.toFixed(1) + 's for ' + v._vpUrl.slice(-40));
     localStorage.setItem(_vpPosKey(v._vpUrl), String(v.currentTime));
   }
 }
 
 function _closeVideo() {
   const v = document.getElementById('video-player');
-  console.log('[VP] _closeVideo: url=' + !!v._vpUrl + ' currentTime=' + (v.currentTime||0).toFixed(1));
   _vpSavePos(v);
   v.pause();
   v.removeAttribute('src');
   v._vpUrl = null;
+  v.onerror = null;
   v.load();
+  document.getElementById('vp-status').style.display = 'none';
   document.getElementById('video-overlay').style.display = 'none';
   if (_vpRAF) { cancelAnimationFrame(_vpRAF); _vpRAF = null; }
 }
@@ -19670,7 +19719,7 @@ function _vpFmtTime(s) {
 function _vpStartLoop() {
   function update() {
     const v = document.getElementById('video-player');
-    if (!v || !v.src) return;
+    if (!v || !v._vpUrl) return;
     const dur = v.duration || 0;
     const cur = v.currentTime || 0;
     // Played bar
@@ -19736,10 +19785,25 @@ function _vpSetVolume(val) {
 }
 
 function _vpFullscreen() {
-  const el = document.getElementById('video-player');
+  const container = document.getElementById('vp-container');
+  const v = document.getElementById('video-player');
+  // iOS Safari: use webkitEnterFullscreen on the video element
+  if (v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); return; }
+  const el = container || v;
   if (el.requestFullscreen) el.requestFullscreen();
   else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
-  else if (el.webkitEnterFullscreen) el.webkitEnterFullscreen(); // iOS
+}
+
+function _vpAirPlay() {
+  const v = document.getElementById('video-player');
+  if (v.webkitShowPlaybackTargetPicker) v.webkitShowPlaybackTargetPicker();
+}
+
+function _vpPiP() {
+  const v = document.getElementById('video-player');
+  if (document.pictureInPictureElement) { document.exitPictureInPicture().catch(() => {}); return; }
+  if (v.requestPictureInPicture) v.requestPictureInPicture().catch(() => {});
+  else if (v.webkitSupportsPresentationMode) v.webkitSetPresentationMode(v.webkitPresentationMode === 'picture-in-picture' ? 'inline' : 'picture-in-picture');
 }
 
 function _vpShowControls() {
@@ -19752,13 +19816,37 @@ function _vpShowControls() {
   }, 3000);
 }
 
-// Click video to toggle play, mousemove to show controls
+// Click/tap video to toggle play, mousemove/touchstart to show controls
 document.getElementById('video-player').addEventListener('click', e => { e.stopPropagation(); _vpTogglePlay(); });
 document.getElementById('vp-container').addEventListener('mousemove', _vpShowControls);
+document.getElementById('vp-container').addEventListener('touchstart', _vpShowControls, { passive: true });
+
+// Touch seek on progress bar
+(function() {
+  const bar = document.getElementById('vp-progress-wrap');
+  if (!bar) return;
+  function touchSeek(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
+    const v = document.getElementById('video-player');
+    if (v.duration) v.currentTime = pct * v.duration;
+  }
+  bar.addEventListener('touchstart', touchSeek, { passive: false });
+  bar.addEventListener('touchmove', touchSeek, { passive: false });
+})();
+
+// Hide volume slider on mobile (iOS ignores programmatic volume)
+if ('ontouchstart' in window) {
+  const vw = document.getElementById('vp-volume-wrap');
+  if (vw) vw.style.display = 'none';
+}
+
 // Keyboard controls
 document.getElementById('video-overlay').addEventListener('keydown', e => {
   const v = document.getElementById('video-player');
-  if (!v || !v.src) return;
+  if (!v || !v._vpUrl) return;
   if (e.key === ' ' || e.key === 'k') { e.preventDefault(); _vpTogglePlay(); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); v.currentTime = Math.max(0, v.currentTime - 10); }
   if (e.key === 'ArrowRight') { e.preventDefault(); v.currentTime = Math.min(v.duration || 0, v.currentTime + 10); }
@@ -24413,41 +24501,140 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
             return self._json({"error": "not found"}, 404)
 
-        # ── Browser automation (/api/browser/*) ───────────────────────────────
+        # ── Browser automation (/api/browser/*) — powered by browser-use CLI ──
         if path.startswith("/api/browser"):
 
             # GET /api/browser/profiles
             if method == "GET" and path == "/api/browser/profiles":
-                return self._json({"profiles": _pw_list_profiles()})
+                return self._json({"profiles": _bu_list_profiles()})
 
-            # GET /api/browser/search?q=...&profile=google
+            # POST /api/browser/start  {"url":"...","session":"...","profile":"..."}
+            if method == "POST" and path == "/api/browser/start":
+                body = self._read_body()
+                url = body.get("url", "about:blank")
+                session = body.get("session", "amux")
+                profile = body.get("profile")
+                args = []
+                if profile:
+                    args += ["-b", "real", "--profile", profile]
+                args += ["open", url]
+                return self._json(_bu_call(args, session=session, timeout_s=30))
+
+            # POST /api/browser/navigate  {"url":"...","session":"..."}
+            if method == "POST" and path == "/api/browser/navigate":
+                body = self._read_body()
+                url = body.get("url", "")
+                if not url:
+                    return self._json({"error": "url required"}, 400)
+                session = body.get("session", "amux")
+                return self._json(_bu_call(["open", url], session=session))
+
+            # GET /api/browser/screenshot?session=amux&url=...
+            if method == "GET" and path == "/api/browser/screenshot":
+                session = (qs.get("session", ["amux"])[0] if isinstance(qs.get("session"), list)
+                           else qs.get("session", "amux"))
+                url_param = (qs.get("url", [""])[0] if isinstance(qs.get("url"), list)
+                             else qs.get("url", ""))
+                if url_param:
+                    _bu_call(["open", url_param], session=session, timeout_s=20)
+                    import time as _t; _t.sleep(2)
+                return self._json(_bu_screenshot(session=session))
+
+            # GET /api/browser/state?session=amux
+            if method == "GET" and path == "/api/browser/state":
+                session = (qs.get("session", ["amux"])[0] if isinstance(qs.get("session"), list)
+                           else qs.get("session", "amux"))
+                return self._json(_bu_call(["state"], session=session))
+
+            # POST /api/browser/action  {"action":"click|type|key|scroll|eval","session":"...","..."}
+            if method == "POST" and path == "/api/browser/action":
+                body = self._read_body()
+                action = body.get("action", "")
+                session = body.get("session", "amux")
+                if action == "click":
+                    x, y = body.get("x"), body.get("y")
+                    index = body.get("index")
+                    if index is not None:
+                        return self._json(_bu_call(["click", str(index)], session=session))
+                    elif x is not None and y is not None:
+                        return self._json(_bu_call(["click", str(x), str(y)], session=session))
+                    return self._json({"error": "click needs index or x,y"}, 400)
+                elif action == "type":
+                    text = body.get("text", "")
+                    return self._json(_bu_call(["type", text], session=session))
+                elif action == "input":
+                    index = body.get("index")
+                    text = body.get("text", "")
+                    if index is None:
+                        return self._json({"error": "input needs index and text"}, 400)
+                    return self._json(_bu_call(["input", str(index), text], session=session))
+                elif action == "key":
+                    key = body.get("key", "")
+                    return self._json(_bu_call(["keys", key], session=session))
+                elif action == "scroll":
+                    direction = "down" if body.get("dy", 500) > 0 else "up"
+                    amount = abs(body.get("dy", 500))
+                    return self._json(_bu_call(["scroll", direction, "--amount", str(amount)], session=session))
+                elif action == "eval":
+                    script = body.get("script", "")
+                    if not script:
+                        return self._json({"error": "script required"}, 400)
+                    return self._json(_bu_call(["eval", script], session=session))
+                elif action == "wait":
+                    selector = body.get("selector", "")
+                    text = body.get("text", "")
+                    timeout = str(body.get("timeout", 5000))
+                    if selector:
+                        return self._json(_bu_call(["wait", "selector", selector, "--timeout", timeout], session=session))
+                    elif text:
+                        return self._json(_bu_call(["wait", "text", text, "--timeout", timeout], session=session))
+                    return self._json({"error": "wait needs selector or text"}, 400)
+                elif action == "extract":
+                    return self._json(_bu_call(["state"], session=session))
+                elif action == "back":
+                    return self._json(_bu_call(["back"], session=session))
+                return self._json({"error": f"unknown action: {action}"}, 400)
+
+            # GET /api/browser/search?q=...
             if method == "GET" and path == "/api/browser/search":
-                q = qs.get("q", [""])[0] if isinstance(qs.get("q"), list) else qs.get("q", "")
-                prof = qs.get("profile", ["google"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "google")
+                q = (qs.get("q", [""])[0] if isinstance(qs.get("q"), list)
+                     else qs.get("q", ""))
                 if not q:
                     return self._json({"error": "q required"}, 400)
-                result = _browser_call({"cmd": "search", "q": q, "profile": prof}, timeout_s=45)
-                status = 429 if "CAPTCHA" in result.get("error", "") else 200
-                return self._json(result, status)
+                session = "search"
+                _bu_call(["open", f"https://www.google.com/search?q={q}"], session=session, timeout_s=20)
+                import time as _t; _t.sleep(2)
+                result = _bu_call(["eval", """
+                    Array.from(document.querySelectorAll('div.g')).slice(0,8).map(el => ({
+                        title: (el.querySelector('h3') || {}).textContent || '',
+                        url: (el.querySelector('a') || {}).href || '',
+                        snippet: (el.querySelector('.VwiC3b, [data-sncf]') || {}).textContent || ''
+                    })).filter(r => r.title)
+                """], session=session)
+                if result.get("success") and result.get("data", {}).get("result"):
+                    return self._json({"results": result["data"]["result"]})
+                return self._json(result)
 
-            # POST /api/browser/login  {"url":"...","username":"...","password":"...","profile":"name"}
-            if method == "POST" and path == "/api/browser/login":
+            # POST /api/browser/stop  {"session":"..."}
+            if method == "POST" and path == "/api/browser/stop":
                 body = self._read_body()
-                if not body.get("url") or not body.get("profile"):
-                    return self._json({"error": "url and profile are required"}, 400)
-                return self._json(_browser_call({
-                    "cmd": "login",
-                    "url": body["url"],
-                    "username": body.get("username", ""),
-                    "password": body.get("password", ""),
-                    "profile": body["profile"],
-                }, timeout_s=45))
+                session = body.get("session", "amux")
+                return self._json(_bu_call(["close"], session=session, timeout_s=10))
 
-            # GET /api/browser/screenshot?profile=NAME&url=https://...
-            if method == "GET" and path == "/api/browser/screenshot":
-                prof = qs.get("profile", ["default"])[0] if isinstance(qs.get("profile"), list) else qs.get("profile", "default")
-                url_param = qs.get("url", [""])[0] if isinstance(qs.get("url"), list) else qs.get("url", "")
-                return self._json(_browser_call({"cmd": "screenshot", "profile": prof, "url": url_param or None}))
+            # GET /api/browser/sessions
+            if method == "GET" and path == "/api/browser/sessions":
+                try:
+                    r = subprocess.run([_BROWSER_USE_BIN, "sessions"],
+                                       capture_output=True, text=True, timeout=5)
+                    sessions = []
+                    for line in r.stdout.strip().splitlines():
+                        line = line.strip()
+                        if ":" in line:
+                            name, status = line.split(":", 1)
+                            sessions.append({"name": name.strip(), "status": status.strip()})
+                    return self._json({"sessions": sessions})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
 
             return self._json({"error": "browser route not found"}, 404)
 
