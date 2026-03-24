@@ -167,7 +167,19 @@ _LOGIN_HTML = """<!DOCTYPE html>
           if (user && !exchanging) exchangeAndRedirect();
         });
       } catch(e) {
-        setStatus('ERROR: ' + e.message);
+        // Clerk throws authorization_invalid when session is stale —
+        // clear local state and retry with a fresh sign-in form.
+        if (e.message && (e.message.includes('authorization') || e.message.includes('Unauthorized'))) {
+          console.warn('[clerk] stale session, clearing and retrying:', e.message);
+          try { await window.Clerk.signOut(); } catch(_) {}
+          window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
+          window.Clerk.addListener(({ user }) => {
+            if (user && !exchanging) exchangeAndRedirect();
+          });
+          setStatus('Session expired — please sign in again.');
+        } else {
+          setStatus('ERROR: ' + e.message);
+        }
       }
     };
     document.head.appendChild(s);
@@ -1027,6 +1039,25 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"[stripe] payment failed for {cust_id}", flush=True)
             return self._json({"ok": True})
 
+        # ── Public: Clerk health check ──
+        if path == "/api/cloud-health" and self.command == "GET":
+            health = {"clerk": "unknown", "domain": ""}
+            try:
+                raw = CLERK_PUBLISHABLE_KEY.split("_", 2)[2]
+                raw += "=" * (-len(raw) % 4)
+                domain = base64.b64decode(raw).decode().strip("$")
+                health["domain"] = domain
+                req = urllib.request.Request(
+                    f"https://{domain}/.well-known/jwks.json", method="GET")
+                resp = urllib.request.urlopen(req, timeout=5)
+                keys = json.loads(resp.read()).get("keys", [])
+                health["clerk"] = "ok" if keys else "no_keys"
+                health["key_count"] = len(keys)
+            except Exception as e:
+                health["clerk"] = f"error: {e}"
+                print(f"[auth-error] Clerk health check failed: {e}", flush=True)
+            return self._json(health)
+
         # ── Public: exchange Clerk JWT for session cookie ──
         if path == "/api/cloud-logout" and self.command in ("GET", "POST"):
             sec = self._secure_cookie_flags()
@@ -1046,6 +1077,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 user_id, email = verify_clerk_token(token)
             except Exception as e:
+                client_ip = self.headers.get("X-Forwarded-For", self.client_address[0])
+                ua = self.headers.get("User-Agent", "")[:80]
+                print(f"[auth-error] cloud-auth token verify failed: {e} ip={client_ip} ua={ua}", flush=True)
                 return self._json({"error": f"invalid token: {e}"}, 401)
             # Prefer email from client (Clerk.js), then JWT, then Clerk API
             if not email:
@@ -1105,7 +1139,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 user_id, email = verify_clerk_token(auth[7:])
             except Exception as e:
-                print(f"[auth] Bearer verify failed for {path}: {e}", flush=True)
+                client_ip = self.headers.get("X-Forwarded-For", self.client_address[0])
+                ua = self.headers.get("User-Agent", "")[:80]
+                print(f"[auth-error] Bearer verify failed: path={path} err={e} ip={client_ip} ua={ua}", flush=True)
                 return self._json({"error": f"invalid token: {e}"}, 401)
         else:
             cookies = _parse_cookies(self.headers.get("Cookie", ""))
