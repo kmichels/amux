@@ -23,6 +23,7 @@ STRIPE_WEBHOOK_SECRET   = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRO_PRICE_ID     = os.environ.get("STRIPE_PRO_PRICE_ID", "")      # monthly
 STRIPE_ANNUAL_PRICE_ID  = os.environ.get("STRIPE_ANNUAL_PRICE_ID", "")   # annual
 TRIAL_DAYS              = int(os.environ.get("TRIAL_DAYS", "7"))
+REFERRAL_BONUS_DAYS     = int(os.environ.get("REFERRAL_BONUS_DAYS", "7"))
 
 PORT          = int(os.environ.get("GATEWAY_PORT", "8080"))
 COMPOSE_TPL   = os.path.join(os.path.dirname(__file__), "../docker/docker-compose.template.yml")
@@ -260,6 +261,95 @@ _UPGRADE_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# ── Referral page HTML ─────────────────────────────────────────────────────────
+_REFERRAL_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Refer & Earn — amux cloud</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0a0a0a; color: #e5e5e5;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .wrap { max-width: 520px; width: 90%; }
+    .logo { font-size: 1.4rem; font-weight: 700; color: #fff; margin-bottom: 32px; text-align: center; }
+    .logo span { color: #555; font-weight: 400; }
+    h1 { font-size: 1.5rem; margin-bottom: 8px; text-align: center; }
+    .sub { color: #888; font-size: 0.88rem; margin-bottom: 32px; line-height: 1.5; text-align: center; }
+    .reward { background: #1a1a2e; border: 1px solid #333; border-radius: 12px; padding: 20px;
+      text-align: center; margin-bottom: 24px; }
+    .reward .big { font-size: 2rem; font-weight: 700; color: #a78bfa; }
+    .reward .label { color: #888; font-size: 0.82rem; margin-top: 4px; }
+    .link-box { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px 14px;
+      display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .link-box input { flex: 1; background: none; border: none; color: #e5e5e5; font-size: 0.88rem;
+      font-family: monospace; outline: none; }
+    .link-box button { background: #7c6fcd; color: #fff; border: none; border-radius: 6px;
+      padding: 8px 16px; font-size: 0.82rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .link-box button:hover { background: #9b8ee0; }
+    .stats { display: flex; gap: 16px; margin-bottom: 24px; }
+    .stat { flex: 1; background: #111; border: 1px solid #222; border-radius: 8px; padding: 14px;
+      text-align: center; }
+    .stat .num { font-size: 1.4rem; font-weight: 700; color: #fff; }
+    .stat .lbl { color: #666; font-size: 0.75rem; margin-top: 2px; }
+    .referrals-list { margin-top: 16px; }
+    .referrals-list h3 { font-size: 0.9rem; color: #888; margin-bottom: 10px; }
+    .ref-row { display: flex; justify-content: space-between; padding: 8px 0;
+      border-bottom: 1px solid #1a1a1a; font-size: 0.82rem; }
+    .ref-email { color: #ccc; }
+    .ref-date { color: #555; }
+    .back { text-align: center; margin-top: 20px; }
+    .back a { color: #888; font-size: 0.82rem; text-decoration: underline; text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="logo">amux <span>cloud</span></div>
+    <h1>Refer friends, earn free days</h1>
+    <div class="sub">Share your link. When someone signs up, you both get <strong>__BONUS_DAYS__ extra days</strong> of free cloud usage.</div>
+    <div class="reward">
+      <div class="big" id="bonus-days">—</div>
+      <div class="label">bonus days earned</div>
+    </div>
+    <div class="link-box">
+      <input id="ref-url" readonly value="loading...">
+      <button onclick="copy()">Copy link</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="num" id="ref-count">—</div><div class="lbl">referrals</div></div>
+      <div class="stat"><div class="num" id="bonus-per">__BONUS_DAYS__</div><div class="lbl">days per referral</div></div>
+    </div>
+    <div class="referrals-list" id="ref-list"></div>
+    <div class="back"><a href="/">← Back to dashboard</a></div>
+  </div>
+  <script>
+    fetch('/api/gateway/referral').then(r=>r.json()).then(d=>{
+      document.getElementById('ref-url').value = d.referral_url || '';
+      document.getElementById('ref-count').textContent = d.referrals_count;
+      document.getElementById('bonus-days').textContent = d.bonus_days_earned;
+    });
+    fetch('/api/gateway/referrals').then(r=>r.json()).then(d=>{
+      if (!d.referrals || !d.referrals.length) return;
+      var h = '<h3>Your referrals</h3>';
+      d.referrals.forEach(function(r) {
+        var dt = new Date(r.created_at * 1000).toLocaleDateString();
+        h += '<div class="ref-row"><span class="ref-email">' + (r.email||'user') + '</span><span class="ref-date">' + dt + '</span></div>';
+      });
+      document.getElementById('ref-list').innerHTML = h;
+    });
+    function copy() {
+      var inp = document.getElementById('ref-url');
+      inp.select(); navigator.clipboard.writeText(inp.value).then(function(){
+        var btn = inp.nextElementSibling;
+        btn.textContent = 'Copied!'; setTimeout(function(){ btn.textContent = 'Copy link'; }, 1500);
+      });
+    }
+  </script>
+</body>
+</html>"""
+
 # ── Invite accept HTML ─────────────────────────────────────────────────────────
 _INVITE_ACCEPT_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -441,6 +531,28 @@ def get_db():
     conn.execute(
         "UPDATE users SET trial_ends_at = created_at + ? WHERE plan = 'free' AND trial_ends_at IS NULL",
         (TRIAL_DAYS * 86400,))
+    conn.commit()
+    # ── Referral program ──
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id TEXT NOT NULL,
+            referee_id  TEXT NOT NULL UNIQUE,
+            code        TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            rewarded_at INTEGER
+        )
+    """)
+    try:
+        conn.execute("SELECT referral_code FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE users ADD COLUMN referral_code TEXT")
+        conn.commit()
+    # Backfill referral codes for existing users
+    import secrets as _secrets
+    for row in conn.execute("SELECT id FROM users WHERE referral_code IS NULL"):
+        conn.execute("UPDATE users SET referral_code=? WHERE id=?",
+                     (_secrets.token_urlsafe(6), row["id"]))
     conn.commit()
     return conn
 
@@ -974,6 +1086,23 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.IntegrityError:
                 return self._json({"ok": True, "already": True})
 
+        # ── Public: referral link — /ref/<CODE> ──
+        if path.startswith("/ref/") and self.command == "GET":
+            code = path[5:].strip("/")
+            if code:
+                db = get_db()
+                row = db.execute("SELECT id FROM users WHERE referral_code=?", (code,)).fetchone()
+                if row:
+                    sec = self._secure_cookie_flags()
+                    self.send_response(302)
+                    self.send_header("Location", "/")
+                    self.send_header("Set-Cookie",
+                        f"amux_ref={code}; Path=/; Max-Age=604800; HttpOnly{sec}; SameSite=Lax")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+            return self._serve_login()
+
         # ── Public: Stripe webhook (signature-verified, no auth cookie needed) ──
         if path == "/api/stripe/webhook" and self.command == "POST":
             if not STRIPE_SECRET_KEY:
@@ -1087,14 +1216,18 @@ class Handler(BaseHTTPRequestHandler):
             db = get_db()
             now = int(time.time())
             trial_end = now + TRIAL_DAYS * 86400
+            import secrets as _secrets
+            is_new_user = False
             with _db_lock:
                 row = db.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
                 if not row:
+                    is_new_user = True
                     # New user — open signup with free trial
                     port = alloc_port(db)
+                    ref_code = _secrets.token_urlsafe(6)
                     db.execute(
-                        "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at) VALUES (?,?,?,?,?,?,?)",
-                        (user_id, email, "free", port, now, now, trial_end))
+                        "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at, referral_code) VALUES (?,?,?,?,?,?,?,?)",
+                        (user_id, email, "free", port, now, now, trial_end, ref_code))
                     # Create personal org (id = user_id for Docker volume compat)
                     db.execute(
                         "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, trial_ends_at, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1108,6 +1241,31 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute("UPDATE users SET last_seen=?, email=? WHERE id=?",
                                (now, email, user_id))
                     db.commit()
+            # Process referral if new user signed up via /ref/ link
+            ref_cookie = ""
+            if is_new_user:
+                cookies = _parse_cookies(self.headers.get("Cookie", ""))
+                ref_cookie = cookies.get("amux_ref", "")
+                if ref_cookie:
+                    referrer = db.execute("SELECT id FROM users WHERE referral_code=?", (ref_cookie,)).fetchone()
+                    if referrer and referrer["id"] != user_id:
+                        try:
+                            bonus = REFERRAL_BONUS_DAYS * 86400
+                            db.execute(
+                                "INSERT INTO referrals (referrer_id, referee_id, code, created_at, rewarded_at) VALUES (?,?,?,?,?)",
+                                (referrer["id"], user_id, ref_cookie, now, now))
+                            # Extend referee's trial
+                            db.execute(
+                                "UPDATE orgs SET trial_ends_at = trial_ends_at + ? WHERE id=?",
+                                (bonus, user_id))
+                            # Extend referrer's trial
+                            db.execute(
+                                "UPDATE orgs SET trial_ends_at = trial_ends_at + ? WHERE id=?",
+                                (bonus, referrer["id"]))
+                            db.commit()
+                            print(f"[referral] {email} referred by {referrer['id']} via code {ref_cookie}", flush=True)
+                        except sqlite3.IntegrityError:
+                            pass  # already referred
             cookie_val = _make_cookie(user_id)
             resp_body = json.dumps({"ok": True}).encode()
             sec = self._secure_cookie_flags()
@@ -1117,6 +1275,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie",
                 f"amux_session={cookie_val}; HttpOnly{sec}; SameSite=Lax; "
                 f"Max-Age={COOKIE_MAX_AGE}; Path=/")
+            if ref_cookie:
+                self.send_header("Set-Cookie",
+                    f"amux_ref=; Path=/; Max-Age=0; HttpOnly{sec}; SameSite=Lax")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(resp_body)
@@ -1170,10 +1331,12 @@ class Handler(BaseHTTPRequestHandler):
         with _db_lock:
             row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not row:
+                import secrets as _secrets
                 port = alloc_port(db)
+                ref_code = _secrets.token_urlsafe(6)
                 db.execute(
-                    "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at) VALUES (?,?,?,?,?,?,?)",
-                    (user_id, email, "free", port, now, now, trial_end_upsert))
+                    "INSERT INTO users (id, email, plan, port, created_at, last_seen, trial_ends_at, referral_code) VALUES (?,?,?,?,?,?,?,?)",
+                    (user_id, email, "free", port, now, now, trial_end_upsert, ref_code))
                 db.execute(
                     "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, trial_ends_at, created_at) VALUES (?,?,?,?,?,?,?,?)",
                     (user_id, email or user_id, None, user_id, port, "free", trial_end_upsert, now))
@@ -1183,7 +1346,13 @@ class Handler(BaseHTTPRequestHandler):
                 db.commit()
                 row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             else:
-                db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, user_id))
+                # Backfill referral code for users created before referral program
+                if not row["referral_code"]:
+                    import secrets as _secrets
+                    db.execute("UPDATE users SET referral_code=?, last_seen=? WHERE id=?",
+                               (_secrets.token_urlsafe(6), now, user_id))
+                else:
+                    db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, user_id))
                 db.commit()
             # Ensure personal org exists (migration backfill)
             org_exists = db.execute("SELECT 1 FROM orgs WHERE id=?", (user_id,)).fetchone()
@@ -1580,6 +1749,34 @@ class Handler(BaseHTTPRequestHandler):
                 "has_annual": bool(STRIPE_ANNUAL_PRICE_ID),
                 "org_id": target_org,
             })
+
+        # ── Referral page (HTML) ──────────────────────────────────────────────
+        if path == "/referrals" and self.command == "GET":
+            html = _REFERRAL_HTML.replace("__BONUS_DAYS__", str(REFERRAL_BONUS_DAYS))
+            return self._html(html)
+
+        # ── Referral program ───────────────────────────────────────────────────
+        if path == "/api/gateway/referral" and self.command == "GET":
+            urow = db.execute("SELECT referral_code FROM users WHERE id=?", (user_id,)).fetchone()
+            code = urow["referral_code"] if urow else None
+            count = db.execute(
+                "SELECT COUNT(*) as n FROM referrals WHERE referrer_id=?", (user_id,)
+            ).fetchone()["n"]
+            return self._json({
+                "referral_code": code,
+                "referral_url": f"{self._base_url()}/ref/{code}" if code else None,
+                "referrals_count": count,
+                "bonus_days_earned": count * REFERRAL_BONUS_DAYS,
+                "bonus_days_per_referral": REFERRAL_BONUS_DAYS,
+            })
+
+        if path == "/api/gateway/referrals" and self.command == "GET":
+            rows = db.execute(
+                "SELECT r.referee_id, u.email, r.created_at, r.rewarded_at "
+                "FROM referrals r JOIN users u ON r.referee_id = u.id "
+                "WHERE r.referrer_id=? ORDER BY r.created_at DESC", (user_id,)
+            ).fetchall()
+            return self._json({"referrals": [dict(r) for r in rows], "count": len(rows)})
 
         # ── Admin: gateway logs ───────────────────────────────────────────────
         if path.startswith("/api/gateway/logs") and self.command == "GET":
