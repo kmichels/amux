@@ -55,7 +55,8 @@ _LOGIN_HTML = """<!DOCTYPE html>
     .logo { font-size: 1.4rem; font-weight: 700; letter-spacing: -0.5px; color: #fff; }
     .logo span { color: #555; font-weight: 400; }
     #clerk-root { min-width: 320px; }
-    #status { color: #aaa; font-size: 0.85rem; min-height: 1.2em; }
+    #status { color: #aaa; font-size: 0.85rem; min-height: 1.2em; text-align: center; }
+    #status.error { color: #f87171; }
     .spinner {
       width: 18px; height: 18px;
       border: 2px solid #333; border-top-color: #aaa;
@@ -63,6 +64,11 @@ _LOGIN_HTML = """<!DOCTYPE html>
       margin: 0 auto;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .retry-btn {
+      background: #333; color: #e5e5e5; border: 1px solid #555; border-radius: 8px;
+      padding: 8px 20px; font-size: 0.85rem; cursor: pointer; margin-top: 12px;
+    }
+    .retry-btn:hover { background: #444; }
   </style>
 </head>
 <body>
@@ -96,18 +102,44 @@ _LOGIN_HTML = """<!DOCTYPE html>
     let exchanging = false;
     const POST_LOGIN_REDIRECT = '__POST_LOGIN_REDIRECT__';
 
-    function setStatus(msg) {
-      document.getElementById('status').textContent = msg;
+    function setStatus(msg, isError) {
+      const el = document.getElementById('status');
+      el.className = isError ? 'error' : '';
+      el.textContent = msg;
+    }
+
+    function showError(msg) {
+      const clerkEl = document.getElementById('clerk-root');
+      clerkEl.innerHTML = '';
+      setStatus(msg, true);
+      // Show retry button
+      let btn = document.getElementById('retry-btn');
+      if (!btn) {
+        btn = document.createElement('button');
+        btn.id = 'retry-btn';
+        btn.className = 'retry-btn';
+        btn.textContent = 'Try Again';
+        btn.onclick = () => { window.location.reload(); };
+        document.getElementById('status').after(btn);
+      }
+      btn.style.display = '';
+    }
+
+    function hideRetry() {
+      const btn = document.getElementById('retry-btn');
+      if (btn) btn.style.display = 'none';
     }
 
     async function exchangeAndRedirect() {
       if (exchanging) return;
       exchanging = true;
+      hideRetry();
       const clerkEl = document.getElementById('clerk-root');
       clerkEl.innerHTML = '<div class="spinner"></div>';
       setStatus('Starting your workspace\u2026');
       try {
         const token = await window.Clerk.session.getToken();
+        if (!token) throw new Error('No session token \u2014 please sign in again.');
         const email = window.Clerk.user?.primaryEmailAddress?.emailAddress || '';
         const res = await fetch('/api/cloud-auth', {
           method: 'POST',
@@ -118,14 +150,12 @@ _LOGIN_HTML = """<!DOCTYPE html>
           window.location.replace(POST_LOGIN_REDIRECT || '/');
         } else {
           const d = await res.json().catch(() => ({}));
-          clerkEl.innerHTML = '';
-          setStatus('Auth error: ' + (d.error || res.status));
           exchanging = false;
+          showError('Auth failed: ' + (d.error || 'status ' + res.status));
         }
       } catch (e) {
-        document.getElementById('clerk-root').innerHTML = '';
-        setStatus('Connection error \u2014 please refresh.');
         exchanging = false;
+        showError(e.message || 'Connection error');
       }
     }
 
@@ -149,37 +179,39 @@ _LOGIN_HTML = """<!DOCTYPE html>
       }
     })();
 
+    function mountSignIn() {
+      window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
+      window.Clerk.addListener(({ user }) => {
+        if (user && !exchanging) exchangeAndRedirect();
+      });
+    }
+
     const s = document.createElement('script');
     s.setAttribute('data-clerk-publishable-key', PK);
-    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@4/dist/clerk.browser.js';
-    s.onerror = () => setStatus('Failed to load auth library.');
+    s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js';
+    s.onerror = () => showError('Failed to load auth library. Check your connection.');
     s.onload = async () => {
       try {
-        if (!window.Clerk) { setStatus('ERROR: Clerk not initialized'); return; }
+        if (!window.Clerk) { showError('Auth library failed to initialize.'); return; }
         await window.Clerk.load();
+        hideRetry();
         setStatus('');
         // If redirected from logout, sign out of Clerk too
         if (new URLSearchParams(location.search).has('logout') && window.Clerk.user) {
           await window.Clerk.signOut();
         }
         if (window.Clerk.user) { await exchangeAndRedirect(); return; }
-        window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
-        window.Clerk.addListener(({ user }) => {
-          if (user && !exchanging) exchangeAndRedirect();
-        });
+        mountSignIn();
       } catch(e) {
+        console.warn('[clerk] init error:', e.message);
         // Clerk throws authorization_invalid when session is stale —
         // clear local state and retry with a fresh sign-in form.
-        if (e.message && (e.message.includes('authorization') || e.message.includes('Unauthorized'))) {
-          console.warn('[clerk] stale session, clearing and retrying:', e.message);
-          try { await window.Clerk.signOut(); } catch(_) {}
-          window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
-          window.Clerk.addListener(({ user }) => {
-            if (user && !exchanging) exchangeAndRedirect();
-          });
-          setStatus('Session expired — please sign in again.');
-        } else {
-          setStatus('ERROR: ' + e.message);
+        try { await window.Clerk.signOut(); } catch(_) {}
+        try {
+          mountSignIn();
+          setStatus('Session expired \u2014 please sign in again.', true);
+        } catch(e2) {
+          showError('Sign-in failed: ' + (e.message || 'unknown error'));
         }
       }
     };
