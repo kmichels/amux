@@ -5530,6 +5530,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip-picker-item { padding: 8px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text); }
   .chip-picker-item:hover { background: rgba(88,166,255,0.1); }
   .chip-picker-item .cpd { color: var(--dim); font-size: 0.75rem; flex: 1; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tts-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; }
+  .tts-dialog { background: var(--card); border: 1px solid var(--border); border-radius: 14px; width: 420px; max-width: 92vw; max-height: 80vh; display: flex; flex-direction: column; overflow: hidden; }
+  .tts-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .tts-header h3 { font-size: 0.95rem; font-weight: 600; color: var(--text); margin: 0; }
+  .tts-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  .tts-body textarea { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; color: var(--text); font-size: 0.85rem; resize: vertical; min-height: 100px; font-family: inherit; outline: none; }
+  .tts-body textarea:focus { border-color: var(--accent); }
+  .tts-body select { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text); font-size: 0.85rem; outline: none; }
+  .tts-footer { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+  .tts-btn { padding: 8px 18px; border-radius: 8px; border: none; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+  .tts-btn-primary { background: var(--accent); color: #fff; }
+  .tts-btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .tts-audio-wrap { display: flex; align-items: center; gap: 10px; }
+  .tts-audio-wrap audio { flex: 1; height: 36px; }
   .send-row { display: flex; gap: 8px; min-width: 0; overflow: visible; position: relative; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
@@ -8517,6 +8531,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <input id="notes-title" type="text" placeholder="Note title…" class="notes-title-input" oninput="_notesTitleChange()" onblur="_notesSaveDebounce()">
       <div style="display:flex;gap:6px;align-items:center;">
         <span id="notes-save-status" style="font-size:0.72rem;color:var(--dim);"></span>
+        <button onclick="_notesTTS()" title="Text to Speech" style="background:none;border:1px solid var(--border);border-radius:6px;padding:3px 7px;cursor:pointer;color:var(--dim);font-size:0.85rem;">&#x1F50A;</button>
         <button id="notes-pin-btn" class="notes-pin-btn" onclick="_notesTogglePinActive()" title="Pin to top"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg></button>
         <button class="notes-delete-btn" onclick="_notesDelete()" title="Delete note"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
       </div>
@@ -13096,6 +13111,109 @@ function saveCustomChip() {
   addChip({ id, label, action: 'send', value: prompt, danger: false });
   closeChipPicker();
   showToast('Added "' + label + '" button');
+}
+
+// ── Text-to-Speech (ElevenLabs) ──
+let _ttsVoices = null;
+let _ttsSelectedVoice = '';
+
+function openTTS(prefillText) {
+  const existing = document.getElementById('tts-wrap');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.id = 'tts-wrap';
+  div.innerHTML = '<div class="tts-overlay" onclick="if(event.target===this)closeTTS()">'
+    + '<div class="tts-dialog">'
+    + '<div class="tts-header"><h3>Text to Speech</h3>'
+    + '<button onclick="closeTTS()" style="background:none;border:none;color:var(--dim);font-size:1.2rem;cursor:pointer;">&times;</button></div>'
+    + '<div class="tts-body">'
+    + '<textarea id="tts-text" placeholder="Enter text to speak...">' + (prefillText ? esc(prefillText) : '') + '</textarea>'
+    + '<select id="tts-voice"><option value="">Loading voices...</option></select>'
+    + '<div id="tts-audio-container"></div>'
+    + '</div>'
+    + '<div class="tts-footer">'
+    + '<div id="tts-status" style="flex:1;font-size:0.8rem;color:var(--dim);"></div>'
+    + '<button class="tts-btn tts-btn-secondary" onclick="closeTTS()">Cancel</button>'
+    + '<button class="tts-btn tts-btn-primary" id="tts-generate-btn" onclick="generateTTS()">&#x1F50A; Generate</button>'
+    + '</div></div></div>';
+  document.body.appendChild(div);
+  _ttsLoadVoices();
+  setTimeout(() => { if (!prefillText) document.getElementById('tts-text')?.focus(); }, 50);
+}
+
+function closeTTS() {
+  document.getElementById('tts-wrap')?.remove();
+}
+
+async function _ttsLoadVoices() {
+  const sel = document.getElementById('tts-voice');
+  if (!sel) return;
+  if (_ttsVoices) {
+    _ttsRenderVoices(sel);
+    return;
+  }
+  try {
+    const r = await fetch(API + '/api/tts/voices', { headers: _authHeaders() });
+    const d = await r.json();
+    if (d.error) { sel.innerHTML = '<option value="">' + esc(d.error) + '</option>'; return; }
+    _ttsVoices = d.voices || [];
+    _ttsRenderVoices(sel);
+  } catch(e) {
+    sel.innerHTML = '<option value="">Failed to load voices</option>';
+  }
+}
+
+function _ttsRenderVoices(sel) {
+  let html = '';
+  const groups = {};
+  (_ttsVoices || []).forEach(v => {
+    const cat = v.category || 'other';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push(v);
+  });
+  Object.keys(groups).sort().forEach(cat => {
+    html += '<optgroup label="' + esc(cat) + '">';
+    groups[cat].forEach(v => {
+      const selected = (_ttsSelectedVoice === v.voice_id || (!_ttsSelectedVoice && v.name === 'George')) ? ' selected' : '';
+      html += '<option value="' + v.voice_id + '"' + selected + '>' + esc(v.name) + '</option>';
+    });
+    html += '</optgroup>';
+  });
+  sel.innerHTML = html;
+}
+
+async function generateTTS() {
+  const text = (document.getElementById('tts-text')?.value || '').trim();
+  if (!text) { showToast('Enter some text first', 'error'); return; }
+  const voiceId = document.getElementById('tts-voice')?.value || '';
+  _ttsSelectedVoice = voiceId;
+  const btn = document.getElementById('tts-generate-btn');
+  const status = document.getElementById('tts-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
+  if (status) status.textContent = 'Sending to ElevenLabs...';
+  try {
+    const r = await fetch(API + '/api/tts', {
+      method: 'POST',
+      headers: _authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({ text, voice_id: voiceId }),
+    });
+    const d = await r.json();
+    if (d.error) { showToast(d.error, 'error'); if (status) status.textContent = d.error; return; }
+    const container = document.getElementById('tts-audio-container');
+    if (container) {
+      const kb = (d.size / 1024).toFixed(1);
+      container.innerHTML = '<div class="tts-audio-wrap">'
+        + '<audio controls autoplay src="' + d.url + '" style="width:100%;"></audio>'
+        + '</div>'
+        + '<div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">' + kb + ' KB &middot; <a href="' + d.url + '" download style="color:var(--accent);">Download MP3</a></div>';
+    }
+    if (status) status.textContent = 'Done!';
+  } catch(e) {
+    showToast('TTS failed: ' + e.message, 'error');
+    if (status) status.textContent = 'Error';
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '&#x1F50A; Generate'; }
+  }
 }
 
 function closeChipPicker() {
@@ -21628,6 +21746,15 @@ async function _notesSave() {
 }
 
 const _TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+function _notesTTS() {
+  if (!_notesActive) return;
+  // Get plain text from the Quill editor
+  const editor = _notesQuill;
+  const text = editor ? editor.getText().trim() : '';
+  if (!text) { showToast('Note is empty', 'error'); return; }
+  openTTS(text);
+}
+
 async function _notesDelete() {
   if (!_notesActive) return;
   const btn = document.querySelector('.notes-delete-btn');
@@ -26404,6 +26531,69 @@ class CCHandler(BaseHTTPRequestHandler):
                     thread_id=body.get("thread_id", ""),
                 )
                 return self._json(result)
+
+            return self._json({"error": "not found"}, 404)
+
+        # ── /api/tts — ElevenLabs text-to-speech ─────────────────────────────
+        if path.startswith("/api/tts"):
+            import urllib.request as _tts_ureq
+
+            elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY", "")
+
+            # GET /api/tts/voices — list available voices
+            if method == "GET" and path == "/api/tts/voices":
+                if not elevenlabs_key:
+                    return self._json({"error": "ELEVENLABS_API_KEY not set in ~/.amux/server.env"}, 400)
+                try:
+                    req = _tts_ureq.Request(
+                        "https://api.elevenlabs.io/v1/voices",
+                        headers={"xi-api-key": elevenlabs_key},
+                    )
+                    resp = _tts_ureq.urlopen(req, timeout=10)
+                    data = json.loads(resp.read())
+                    voices = [{"voice_id": v["voice_id"], "name": v["name"], "category": v.get("category", "")} for v in data.get("voices", [])]
+                    return self._json({"voices": voices})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/tts — generate speech, return audio file URL
+            if method == "POST" and path == "/api/tts":
+                if not elevenlabs_key:
+                    return self._json({"error": "ELEVENLABS_API_KEY not set in ~/.amux/server.env"}, 400)
+                body = self._body_json()
+                text = body.get("text", "").strip()
+                if not text:
+                    return self._json({"error": "text is required"}, 400)
+                voice_id = body.get("voice_id", "JBFqnCBsd6RMkjVDRZzb")  # default: George
+                model = body.get("model", "eleven_multilingual_v2")
+                try:
+                    payload = json.dumps({
+                        "text": text,
+                        "model_id": model,
+                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                    }).encode()
+                    req = _tts_ureq.Request(
+                        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                        data=payload,
+                        headers={
+                            "xi-api-key": elevenlabs_key,
+                            "Content-Type": "application/json",
+                            "Accept": "audio/mpeg",
+                        },
+                    )
+                    resp = _tts_ureq.urlopen(req, timeout=60)
+                    audio_data = resp.read()
+                    fname = f"tts-{int(time.time())}.mp3"
+                    out_path = _amux_home / "uploads" / fname
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(audio_data)
+                    return self._json({
+                        "url": f"/uploads/{fname}",
+                        "size": len(audio_data),
+                        "voice_id": voice_id,
+                    })
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
 
             return self._json({"error": "not found"}, 404)
 
