@@ -13893,11 +13893,54 @@ function _renderFileBody(data, mode) {
   } else if (data.is_markdown) {
     body.className = 'file-overlay-body markdown md-content';
     body.innerHTML = renderMarkdown(data.content);
+    _fileBindAnchors(body);
+  } else if (data.is_html) {
+    body.className = 'file-overlay-body file-html-preview';
+    const iframe = document.createElement('iframe');
+    iframe.sandbox = 'allow-same-origin';
+    iframe.style.cssText = 'width:100%;border:none;flex:1;min-height:400px;background:#fff;border-radius:6px;';
+    body.innerHTML = '';
+    body.appendChild(iframe);
+    iframe.srcdoc = data.content;
+    iframe.onload = function() {
+      // Auto-size to content
+      try { iframe.style.height = (iframe.contentDocument.body.scrollHeight + 20) + 'px'; } catch(e) {}
+      // Bind anchor links inside iframe to scroll within it
+      try {
+        iframe.contentDocument.addEventListener('click', function(e) {
+          const a = e.target.closest('a');
+          if (!a) return;
+          const href = a.getAttribute('href');
+          if (href && href.startsWith('#')) {
+            e.preventDefault();
+            const target = iframe.contentDocument.getElementById(href.slice(1))
+              || iframe.contentDocument.querySelector('[name="' + CSS.escape(href.slice(1)) + '"]');
+            if (target) target.scrollIntoView({ behavior: 'smooth' });
+          }
+        });
+      } catch(e) {}
+    };
   } else {
-    // plain text, html source, etc. — preview = same as raw
+    // plain text — preview = same as raw
     body.className = 'file-overlay-body file-raw';
     body.textContent = data.content;
   }
+}
+
+// Make #anchor links scroll within the preview container instead of navigating
+function _fileBindAnchors(container) {
+  container.addEventListener('click', function(e) {
+    const a = e.target.closest('a');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (href && href.startsWith('#')) {
+      e.preventDefault();
+      const id = href.slice(1);
+      const target = container.querySelector('#' + CSS.escape(id))
+        || container.querySelector('[name="' + CSS.escape(id) + '"]');
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  });
 }
 
 function setFileViewMode(mode) {
@@ -16937,7 +16980,15 @@ function renderMarkdown(raw) {
   // Use marked.js for full GFM support (tables, task lists, strikethrough, etc.)
   if (typeof marked !== 'undefined') {
     try {
-      let html = marked.parse(raw, { gfm: true, breaks: false });
+      const renderer = new marked.Renderer();
+      // Add id to headings so #anchor links work (TOC, cross-refs)
+      renderer.heading = function({ tokens, depth }) {
+        const text = this.parser.parseInline(tokens);
+        const slug = text.replace(/<[^>]+>/g, '').toLowerCase().trim()
+          .replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-');
+        return '<h' + depth + ' id="' + slug + '">' + text + '</h' + depth + '>\n';
+      };
+      let html = marked.parse(raw, { gfm: true, breaks: false, renderer });
       html = html.replace(/<table>/g, '<div class="table-scroll"><table>').replace(/<\/table>/g, '</table></div>');
       return html;
     } catch(e) { /* fall through to basic renderer */ }
@@ -16951,15 +17002,16 @@ function renderMarkdown(raw) {
       return '<pre><code>' + code + '</code></pre>';
     }
     let s = part.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-    s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-    s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+    s = s.replace(/^### (.+)$/gm, (_, t) => { const id = t.toLowerCase().trim().replace(/[^\w\s-]/g,'').replace(/\s+/g,'-'); return '<h3 id="'+id+'">'+t+'</h3>'; });
+    s = s.replace(/^## (.+)$/gm, (_, t) => { const id = t.toLowerCase().trim().replace(/[^\w\s-]/g,'').replace(/\s+/g,'-'); return '<h2 id="'+id+'">'+t+'</h2>'; });
+    s = s.replace(/^# (.+)$/gm, (_, t) => { const id = t.toLowerCase().trim().replace(/[^\w\s-]/g,'').replace(/\s+/g,'-'); return '<h1 id="'+id+'">'+t+'</h1>'; });
     s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
     s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
       const safe = /^(https?:\/\/|\/|#)/.test(url) ? url : '#';
-      return '<a href="' + safe + '" target="_blank">' + text + '</a>';
+      const target = safe.startsWith('#') ? '' : ' target="_blank"';
+      return '<a href="' + safe + '"' + target + '>' + text + '</a>';
     });
     s = s.replace(/^---$/gm, '<hr>');
     s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
