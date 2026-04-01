@@ -1137,6 +1137,52 @@ def _snapshot_all_sessions():
                         _push_alert("auto_restart", name,
                                     f"Claude exited in '{name}' — auto-restarting")
 
+            # ── 5. Stale process reaper: restart idle sessions with old Claude processes
+            # Claude processes lose their API connection after ~2 days but stay running.
+            # Sends succeed (tmux delivers text) but Claude never processes them.
+            # Check once per hour; restart if Claude process uptime > 48h and session is idle.
+            if status == "idle" and not actions.get("restarting"):
+                last_stale_check = actions.get("last_stale_check", 0)
+                if now - last_stale_check > 3600:  # check once per hour
+                    actions["last_stale_check"] = now
+                    try:
+                        tmux_sess = tmux_name(name)
+                        r = subprocess.run(["tmux", "list-panes", "-t", tmux_sess, "-F", "#{pane_pid}"],
+                                           capture_output=True, text=True, timeout=5)
+                        if r.returncode == 0 and r.stdout.strip():
+                            shell_pid = r.stdout.strip().split("\n")[0]
+                            r2 = subprocess.run(["pgrep", "-P", shell_pid],
+                                                capture_output=True, text=True, timeout=5)
+                            if r2.stdout.strip():
+                                claude_pid = r2.stdout.strip().split("\n")[0]
+                                r3 = subprocess.run(["ps", "-o", "etime=", "-p", claude_pid],
+                                                    capture_output=True, text=True, timeout=5)
+                                if r3.stdout.strip():
+                                    # Parse etime format: [[DD-]HH:]MM:SS
+                                    _et = r3.stdout.strip()
+                                    _parts = _et.replace("-", ":").split(":")
+                                    _parts = [int(p) for p in _parts]
+                                    if len(_parts) == 2: elapsed_secs = _parts[0]*60 + _parts[1]
+                                    elif len(_parts) == 3: elapsed_secs = _parts[0]*3600 + _parts[1]*60 + _parts[2]
+                                    elif len(_parts) == 4: elapsed_secs = _parts[0]*86400 + _parts[1]*3600 + _parts[2]*60 + _parts[3]
+                                    else: elapsed_secs = 0
+                                    if elapsed_secs > 48 * 3600:  # > 48 hours
+                                        last_restart = actions.get("last_auto_restart", 0)
+                                        if now - last_restart > 300:
+                                            actions["restarting"] = True
+                                            actions["last_auto_restart"] = now
+                                            def _do_stale_restart(sname=name, _actions=actions, _age=elapsed_secs):
+                                                stop_session(sname)
+                                                time.sleep(3)
+                                                start_session(sname)
+                                                _actions.pop("restarting", None)
+                                            threading.Thread(target=_do_stale_restart, daemon=True).start()
+                                            _push_alert("auto_restart", name,
+                                                        f"Recycled stale session '{name}' — Claude process was "
+                                                        f"{elapsed_secs // 3600}h old")
+                    except Exception:
+                        pass
+
             # ── 3a. Post-compact continuation ──────────────────────────────────
             # After we trigger auto-compact, the session goes idle at the ❯ prompt.
             # status == 'idle' doesn't trigger normal auto-continue, so we handle
