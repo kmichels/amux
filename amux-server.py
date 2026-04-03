@@ -1250,6 +1250,49 @@ def _snapshot_loop():
         pass
 
 
+# ── Browser process reaper ────────────────────────────────────────────────────
+_BROWSER_TTL_SECONDS = 2 * 3600  # 2 hours — kill browser-use Chrome processes older than this
+_last_browser_reap = 0.0
+
+def _reap_stale_browsers():
+    """Kill headless Chrome processes (spawned by browser-use) that exceed the TTL."""
+    global _last_browser_reap
+    now = time.time()
+    if now - _last_browser_reap < 600:  # run at most every 10 minutes
+        return
+    _last_browser_reap = now
+    try:
+        r = subprocess.run(["pgrep", "-f", "browser-use-user-data-dir"],
+                           capture_output=True, text=True, timeout=5)
+        pids = [p.strip() for p in r.stdout.strip().split("\n") if p.strip()]
+        if not pids:
+            return
+        reaped = 0
+        for pid in pids:
+            try:
+                r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
+                                    capture_output=True, text=True, timeout=5)
+                etime = r2.stdout.strip()
+                if not etime:
+                    continue
+                # Parse etime: [[DD-]HH:]MM:SS
+                parts = etime.replace("-", ":").split(":")
+                parts = [int(p) for p in parts]
+                if len(parts) == 2: secs = parts[0]*60 + parts[1]
+                elif len(parts) == 3: secs = parts[0]*3600 + parts[1]*60 + parts[2]
+                elif len(parts) == 4: secs = parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
+                else: continue
+                if secs > _BROWSER_TTL_SECONDS:
+                    os.kill(int(pid), 9)
+                    reaped += 1
+            except (ProcessLookupError, ValueError, subprocess.TimeoutExpired):
+                pass
+        if reaped:
+            slog(f"[browser-reaper] killed {reaped} stale Chrome processes (>{_BROWSER_TTL_SECONDS//3600}h old)")
+    except Exception:
+        pass
+
+
 def get_claude_stats(work_dir: str) -> dict:
     """Get token usage and last activity from Claude Code session files for a directory."""
     if not work_dir:
@@ -8351,6 +8394,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
+  <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
   <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
@@ -8418,6 +8462,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="board-filters" id="board-filters"></div>
   <div class="board-columns" id="board-columns"></div>
+</div>
+<!-- Calendar view -->
+<div id="calendar-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
+    <div class="cal-nav-row">
+      <button class="btn" onclick="calPrev()" title="Previous">&#x25C0;</button>
+      <button class="btn" onclick="calToday()">Today</button>
+      <button class="btn" onclick="calNext()" title="Next">&#x25B6;</button>
+      <span id="cal-title" class="cal-title"></span>
+      <button class="btn" onclick="showIcalInfo()" title="Subscribe to calendar">&#x1F517; Subscribe</button>
+    </div>
+    <div class="cal-controls-row">
+      <button id="cal-tab-month" class="btn" onclick="calSetView('month')">Month</button>
+      <button id="cal-tab-week" class="btn" onclick="calSetView('week')">Week</button>
+      <button id="cal-tab-day" class="btn" onclick="calSetView('day')">Day</button>
+    </div>
+  </div>
+  <div id="cal-body" style="flex:1;overflow-y:auto;padding:8px;"></div>
 </div>
 <!-- Scheduler view -->
 <div id="scheduler-view" style="display:none;">
@@ -9579,7 +9641,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="file-view-tab" id="file-tab-link" onclick="_copyFileDeeplink(_fileData&&_fileData.path||'')" title="Copy deep link">Link</button>
     </div>
     <button id="file-save-btn" onclick="_fileSave()" style="display:none;">Save</button>
-    <a id="file-download-btn" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);text-decoration:none;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</a>
+    <button id="file-download-btn" onclick="_fileDownload()" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);background:transparent;cursor:pointer;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</button>
     <button class="btn" onclick="closeFilePreview()" style="flex-shrink:0;">&#x2715;</button>
   </div>
   <div id="file-body" class="file-overlay-body"></div>
@@ -14234,14 +14296,11 @@ async function openFilePreview(path) {
       // Show Edit tab only for markdown
       document.getElementById('file-tab-edit').style.display = data.is_markdown ? '' : 'none';
     }
-    // Show download button for binary/audio/video/image (not text — they use copy)
-    if (!isTextFile) {
-      const dlBtn = document.getElementById('file-download-btn');
-      const rawUrl = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
-      dlBtn.href = rawUrl;
-      dlBtn.download = data.path.split('/').pop();
-      dlBtn.style.display = '';
-    }
+    // Show download button for all files
+    const dlBtn = document.getElementById('file-download-btn');
+    dlBtn.dataset.url = API + '/api/file/raw?path=' + encodeURIComponent(data.path);
+    dlBtn.dataset.filename = data.path.split('/').pop();
+    dlBtn.style.display = '';
     _renderFileBody(data, _fileViewMode);
     // Update cache
     _idb.setFile(path, { type: 'file', data });
@@ -14274,6 +14333,29 @@ function closeFilePreview() {
   document.getElementById('file-body').style.display = '';
   _fileData = null;
   _fileViewMode = 'preview';
+}
+
+async function _fileDownload() {
+  const dlBtn = document.getElementById('file-download-btn');
+  const url = dlBtn.dataset.url;
+  const filename = dlBtn.dataset.filename || 'download';
+  try {
+    dlBtn.textContent = '⏳ …';
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    dlBtn.textContent = '✓ Done';
+    setTimeout(() => { dlBtn.textContent = '⬇ Download'; }, 2000);
+  } catch(e) {
+    dlBtn.textContent = '⬇ Download';
+    alert('Download failed: ' + e.message);
+  }
 }
 
 async function _fileSave() {
@@ -16185,15 +16267,16 @@ let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svNames = ['sessions','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','flex'];
+  const _svIds = ['session','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
+  const _svNames = ['sessions','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
+  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
     const te = document.getElementById('tab-' + _svNames[i]);
     if (te) te.classList.toggle('active', view === _svNames[i]);
   }
+  if (view === 'calendar') { fetchBoard().then(() => renderCalendar()); }
   if (view === 'torrents') _torrentLoad();
   if (view === 'terminal') _termInit();
   if (view === 'graph') _graphInit();
@@ -18557,7 +18640,7 @@ function enterGridMode() {
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
-  ['sessions','board','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
+  ['sessions','board','calendar','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
   _wsRenderProfileBar();
@@ -26116,6 +26199,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 length = end - start + 1
                 self.send_response(206)
                 self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
                 self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
                 self.send_header("Content-Length", str(length))
                 self.send_header("Accept-Ranges", "bytes")
@@ -26134,6 +26218,7 @@ class CCHandler(BaseHTTPRequestHandler):
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
+                self.send_header("Content-Disposition", f'attachment; filename="{p.name}"')
                 self.send_header("Content-Length", str(file_size))
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("ETag", etag)
@@ -29473,6 +29558,7 @@ def main():
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
+    schedule_job(_reap_stale_browsers,  interval=600,                  name="browser_reap", initial_delay=60)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
