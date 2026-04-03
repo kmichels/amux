@@ -12607,8 +12607,15 @@ async function refreshPeek() {
     // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
-    applyPeekSearch();
-    if (atBottom) body.scrollTop = body.scrollHeight;
+    const hasSearch = peekSearchQuery.trim().length > 0;
+    const savedScrollTop = body.scrollTop;
+    applyPeekSearch(hasSearch);  // keepIndex=true when search is active
+    if (hasSearch) {
+      // Preserve scroll position when user is searching — don't jump
+      body.scrollTop = savedScrollTop;
+    } else if (atBottom) {
+      body.scrollTop = body.scrollHeight;
+    }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
     _idb.set('peek_' + peekSession, { output, time: Date.now() });
