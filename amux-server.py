@@ -8365,6 +8365,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-metrics" onclick="switchView('metrics')">Metrics</button>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
   <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
+  <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-graph" onclick="switchView('graph')">Graph</button>
   <button id="tab-journal" onclick="switchView('journal')">Journal</button>
 </div>
@@ -8881,6 +8882,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="term-container" style="flex:1;min-height:0;background:#0d1117;border-radius:6px;overflow:hidden;position:relative;">
     <div id="term-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--dim);font-size:0.9rem;">
       Enter a host above and click Connect, or leave blank for a local shell
+    </div>
+  </div>
+</div>
+
+<div id="browser-view" style="display:none;">
+  <div style="display:flex;align-items:center;gap:8px;padding:8px;flex-wrap:wrap;">
+    <select id="bw-profile" style="font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;min-width:120px;">
+      <option value="">No profile</option>
+    </select>
+    <button onclick="_bwBack()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&larr;</button>
+    <input id="bw-url" type="text" placeholder="https://example.com" style="flex:1;min-width:200px;font-size:0.82rem;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--fg);font-family:inherit;" onkeydown="if(event.key==='Enter')_bwGo()">
+    <button onclick="_bwGo()" style="font-size:0.82rem;padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:500;">Go</button>
+    <button onclick="_bwScreenshot()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128247; Snap</button>
+    <button onclick="_bwSaveProfile()" style="font-size:0.82rem;padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;cursor:pointer;color:var(--fg);">&#128190; Save Profile</button>
+    <span id="bw-status" style="font-size:0.72rem;color:var(--dim);"></span>
+  </div>
+  <div id="bw-viewport" style="position:relative;padding:0 8px 8px;cursor:crosshair;height:calc(100vh - 160px);overflow:auto;">
+    <img id="bw-img" style="max-width:100%;border:1px solid var(--border);border-radius:4px;display:none;" onclick="_bwClick(event)">
+    <div id="bw-placeholder" style="display:flex;align-items:center;justify-content:center;height:400px;color:var(--dim);font-size:0.9rem;">
+      Enter a URL and click Go to start browsing
     </div>
   </div>
 </div>
@@ -11100,6 +11121,7 @@ const ALL_TABS = [
   { id: 'metrics',       label: 'Metrics' },
   { id: 'torrents',      label: 'Torrents' },
   { id: 'terminal',      label: 'Terminal' },
+  { id: 'browser',       label: 'Browser' },
   { id: 'graph',         label: 'Graph' },
   { id: 'journal',       label: 'Journal' },
 ];
@@ -16213,9 +16235,9 @@ let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  const _svIds = ['session','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svNames = ['sessions','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
-  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','flex'];
+  const _svIds = ['session','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
+  const _svNames = ['sessions','board','calendar','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','browser','graph','journal'];
+  const _svDisplay = ['','','flex','flex','','flex','flex','flex','flex','flex','flex','flex','flex','','flex','flex'];
   for (let i = 0; i < _svIds.length; i++) {
     const ve = document.getElementById(_svIds[i] + '-view');
     if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
@@ -16229,6 +16251,7 @@ function switchView(view) {
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
+  if (view === 'browser') _bwInit();
   if (view === 'journal') _journalInit();
   if (view === 'files') loadFiles(_filesPath);
   else {
@@ -23712,6 +23735,122 @@ function _graphRestorePositions() {
   } catch(e) {}
 }
 
+// ── Browser ─────────────────────────────────────────────────────────────────
+let _bwInited = false;
+let _bwSession = 'amux';
+
+async function _bwInit() {
+  if (_bwInited) return;
+  _bwInited = true;
+  // Load profiles
+  try {
+    const r = await fetch('/api/browser/profiles');
+    const d = await r.json();
+    const sel = document.getElementById('bw-profile');
+    (d.profiles || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p; o.textContent = p;
+      sel.appendChild(o);
+    });
+    // Also add Playwright auth profiles
+    const pw = await fetch('/api/browser/pw-profiles').catch(() => null);
+    if (pw && pw.ok) {
+      const pd = await pw.json();
+      (pd.profiles || []).forEach(p => {
+        const o = document.createElement('option');
+        o.value = 'pw:' + p; o.textContent = '🔐 ' + p;
+        sel.appendChild(o);
+      });
+    }
+  } catch(e) {}
+}
+
+function _bwStatus(msg) {
+  const el = document.getElementById('bw-status');
+  if (el) el.textContent = msg;
+}
+
+async function _bwGo() {
+  const url = document.getElementById('bw-url').value.trim();
+  if (!url) return;
+  const profile = document.getElementById('bw-profile').value;
+  _bwStatus('Loading...');
+  try {
+    const body = { url, session: _bwSession };
+    if (profile && !profile.startsWith('pw:')) body.profile = profile;
+    else if (profile && profile.startsWith('pw:')) body.profile = profile.slice(3);
+    const r = await fetch('/api/browser/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.success === false && d.error) { _bwStatus('Error: ' + d.error); return; }
+    _bwStatus('Navigated');
+    // Auto-screenshot after a delay
+    setTimeout(() => _bwScreenshot(), 2000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwScreenshot() {
+  _bwStatus('Taking screenshot...');
+  try {
+    const r = await fetch('/api/browser/screenshot?session=' + _bwSession + '&t=' + Date.now());
+    const d = await r.json();
+    if (d.path) {
+      // Load via file raw API
+      const img = document.getElementById('bw-img');
+      img.src = '/api/file/raw?path=' + encodeURIComponent(d.path) + '&t=' + Date.now();
+      img.style.display = '';
+      document.getElementById('bw-placeholder').style.display = 'none';
+      _bwStatus('Screenshot taken');
+    } else {
+      _bwStatus(d.error || 'Screenshot failed');
+    }
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwClick(event) {
+  const img = document.getElementById('bw-img');
+  const rect = img.getBoundingClientRect();
+  // Scale click coords to actual viewport (1280x800 default)
+  const scaleX = 1280 / rect.width;
+  const scaleY = 800 / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+  _bwStatus('Clicking ' + x + ',' + y + '...');
+  try {
+    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', x, y, session: _bwSession }) });
+    setTimeout(() => _bwScreenshot(), 1000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwBack() {
+  _bwStatus('Going back...');
+  try {
+    await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'back', session: _bwSession }) });
+    setTimeout(() => _bwScreenshot(), 1000);
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
+async function _bwSaveProfile() {
+  const name = prompt('Profile name to save current session as:');
+  if (!name) return;
+  _bwStatus('Saving profile...');
+  try {
+    const r = await fetch('/api/browser/save-profile', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name, session: _bwSession }) });
+    const d = await r.json();
+    _bwStatus(d.success ? 'Profile saved: ' + name : (d.error || 'Save failed'));
+    if (d.success) {
+      // Add to dropdown if not there
+      const sel = document.getElementById('bw-profile');
+      const exists = Array.from(sel.options).some(o => o.value === 'pw:' + name);
+      if (!exists) {
+        const o = document.createElement('option');
+        o.value = 'pw:' + name; o.textContent = '🔐 ' + name;
+        sel.appendChild(o);
+        sel.value = 'pw:' + name;
+      }
+    }
+  } catch(e) { _bwStatus('Error: ' + e.message); }
+}
+
 // ── Journal ──────────────────────────────────────────────────────────────────
 let _jrnlEntries = [];
 let _jrnlAllEntries = [];
@@ -28237,6 +28376,34 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             name, status = line.split(":", 1)
                             sessions.append({"name": name.strip(), "status": status.strip()})
                     return self._json({"sessions": sessions})
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/browser/pw-profiles — list Playwright auth profiles
+            if method == "GET" and path == "/api/browser/pw-profiles":
+                pw_dir = Path.home() / ".amux" / "playwright-auth" / "profiles"
+                profiles = set()
+                if pw_dir.is_dir():
+                    profiles = {p.name for p in pw_dir.iterdir() if p.is_dir()}
+                # Also include default profile
+                default_dir = Path.home() / ".amux" / "playwright-auth" / "profile"
+                if default_dir.is_dir():
+                    profiles.add("default")
+                return self._json({"profiles": sorted(profiles)})
+
+            # POST /api/browser/save-profile  {"name":"...", "session":"..."}
+            if method == "POST" and path == "/api/browser/save-profile":
+                body = self._read_body()
+                name = body.get("name", "").strip()
+                if not name:
+                    return self._json({"error": "name required"}, 400)
+                session = body.get("session", "amux")
+                # Save current browser-use session cookies to a Playwright auth profile
+                dest = Path.home() / ".amux" / "playwright-auth" / "profiles" / name
+                dest.mkdir(parents=True, exist_ok=True)
+                try:
+                    result = _bu_call(["save-cookies", str(dest)], session=session, timeout_s=15)
+                    return self._json({"success": True, "profile": name, "path": str(dest)})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
