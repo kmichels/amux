@@ -16754,6 +16754,12 @@ let boardOwnerFilter = localStorage.getItem('amux_board_owner') || 'human';
 let _sessionGroupCollapsed = JSON.parse(localStorage.getItem('amux_board_collapsed') || '{}');
 let _tagGroupCollapsed = JSON.parse(localStorage.getItem('amux_status_collapsed') || '{}');
 let _collapsedCols = new Set(JSON.parse(localStorage.getItem('amux_col_collapsed') || '[]'));
+let _boardColPages = {};  // tracks how many cards to show per column (lazy load)
+
+function _boardShowMore(colId, pageSize) {
+  _boardColPages[colId] = (_boardColPages[colId] || pageSize) + pageSize;
+  renderBoard();
+}
 
 const _BUILT_IN_STATUS_STYLE = {
   'backlog':   {bg:'rgba(88,166,255,0.12)',color:'var(--accent)',border:'rgba(88,166,255,0.3)',dot:'var(--accent)'},
@@ -18170,7 +18176,11 @@ function _renderBoardBySession(visible, container) {
     html += '<div class="board-session-counts">' + _sessionCountsHtml(humanItems) + '</div></div>';
     if (!collapsed) {
       html += '<div class="board-session-items">';
-      humanItems.forEach(function(item) { html += _renderBoardCard(item); });
+      const _hPage = _boardColPages['__human__'] || 20;
+      const _hVisible = humanItems.slice(0, _hPage);
+      const _hRem = humanItems.length - _hPage;
+      _hVisible.forEach(function(item) { html += _renderBoardCard(item); });
+      if (_hRem > 0) html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'__human__\',20)">Show ' + Math.min(_hRem, 20) + ' more (' + _hRem + ' remaining)</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -18188,7 +18198,11 @@ function _renderBoardBySession(visible, container) {
     html += '<div class="board-session-counts">' + _sessionCountsHtml(items) + '</div></div>';
     if (!collapsed) {
       html += '<div class="board-session-items">';
-      items.forEach(function(item) { html += _renderBoardCard(item); });
+      const _sPage = _boardColPages[groupKey] || 20;
+      const _sVisible = items.slice(0, _sPage);
+      const _sRem = items.length - _sPage;
+      _sVisible.forEach(function(item) { html += _renderBoardCard(item); });
+      if (_sRem > 0) html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'' + esc(groupKey) + '\',20)">Show ' + Math.min(_sRem, 20) + ' more (' + _sRem + ' remaining)</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -18283,7 +18297,14 @@ function renderBoard() {
       html += '<div class="board-empty">Nothing here</div>';
     }
     stCol.sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
-    stCol.forEach(item => { html += _renderBoardCard(item); });
+    const PAGE_SIZE = 20;
+    const showCount = _boardColPages[st] || PAGE_SIZE;
+    const visibleCards = stCol.slice(0, showCount);
+    const remaining = stCol.length - showCount;
+    visibleCards.forEach(item => { html += _renderBoardCard(item); });
+    if (remaining > 0) {
+      html += '<button class="board-add-btn" style="color:var(--accent);border-color:var(--accent);opacity:0.8;" onclick="event.stopPropagation();_boardShowMore(\'' + st + '\',' + PAGE_SIZE + ')">Show ' + Math.min(remaining, PAGE_SIZE) + ' more (' + remaining + ' remaining)</button>';
+    }
     if (st === 'done' && stCol.length > 0) {
       html += '<button class="board-add-btn" style="color:var(--red);border-color:rgba(248,81,73,0.2);" onclick="clearDone()">Clear done</button>';
     }
