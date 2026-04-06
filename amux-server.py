@@ -13381,14 +13381,10 @@ async function sendPeekCmd() {
   delete _peekDrafts[peekSession];
   clearPeekFiles();
 
-  const routed = files.length === 0 && _atRoute(message);
-  if (routed) {
-    await doSend(routed.target, routed.message);
-    showToast('Sent to @' + routed.target);
-  } else {
-    message = _expandAtMentions(message);
-    await doSend(peekSession, message);
-  }
+  // In peek view, always send to the current session (don't route @mentions away).
+  // @mentions are expanded as API hints so Claude knows how to reach them.
+  message = _expandAtMentions(message);
+  await doSend(peekSession, message);
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
   setTimeout(refreshPeek, 500);
