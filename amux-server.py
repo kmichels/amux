@@ -9429,7 +9429,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="field-group">
       <label class="field-label">Command</label>
-      <input id="sched-command" type="text" placeholder="e.g. /status or npm run build" autocomplete="off">
+      <textarea id="sched-command" rows="3" placeholder="e.g. /status or npm run build" autocomplete="off" style="resize:vertical;font-family:monospace;font-size:0.85rem;"></textarea>
     </div>
     <div class="field-group">
       <label class="field-label">Schedule</label>
