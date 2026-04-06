@@ -10147,23 +10147,32 @@ async function apikeySetupLogin() {
   // Dismiss the modal
   const m = document.getElementById('apikey-setup-modal');
   if (m) m.style.display = 'none';
-  // Create a temporary login session and send /login
   try {
-    const r = await fetch(API + '/api/sessions', {
+    // Create session (ignore 409 if already exists)
+    await fetch(API + '/api/sessions', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ name: 'login', desc: 'Claude account login' })
     });
-    if (!r.ok) {
-      // Session might already exist — that's fine
-    }
-    // Send /login to the session
-    await fetch(API + '/api/sessions/login/send', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ text: '/login' })
-    });
-    // Open the peek view so the user can see the login flow
-    showToast('Opening login session — follow the URL to authenticate');
+    // Start the session (ensures tmux pane is up)
+    await fetch(API + '/api/sessions/login/start', { method: 'POST' });
+    showToast('Starting login session — please wait...');
+    // Open peek immediately so user sees progress
     setTimeout(() => { openPeek('login'); }, 500);
+    // Wait for Claude to be ready, then send /login
+    let sent = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const sr = await fetch(API + '/api/sessions/login/send', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ text: '/login' })
+      });
+      if (sr.ok) { sent = true; break; }
+    }
+    if (sent) {
+      showToast('Follow the URL in the terminal to authenticate');
+    } else {
+      showToast('Session started — type /login in the terminal');
+    }
     // Poll for OAuth completion
     _pollForOAuth();
   } catch(e) {
