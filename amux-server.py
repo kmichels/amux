@@ -155,6 +155,8 @@ CLAUDE_HOME = Path.home() / ".claude"
 _S3_BUCKET = os.environ.get("AMUX_S3_BUCKET", "")
 _S3_KEY = os.environ.get("AMUX_S3_KEY", "amux/calendar.ics")
 _S3_REGION = os.environ.get("AMUX_S3_REGION", "us-east-1")
+# Google Calendar push sync (optional — set AMUX_GCAL_ID to enable)
+_GCAL_ID = os.environ.get("AMUX_GCAL_ID", "")
 _S3_CAL_URL = (
     f"https://{_S3_BUCKET}.s3.{_S3_REGION}.amazonaws.com/{_S3_KEY}"
     if _S3_BUCKET else ""
@@ -2060,6 +2062,7 @@ def _init_db():
         "ALTER TABLE schedules ADD COLUMN done_pattern TEXT",
         "ALTER TABLE schedules ADD COLUMN done_action TEXT NOT NULL DEFAULT 'disable'",
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
     ]:
         try:
             db.execute(migration)
@@ -2724,6 +2727,65 @@ def _upload_ical_to_s3():
         slog(f"S3 iCal upload failed: {e}")
 
 
+def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str = "",
+                    desc: str = "", status: str = "", deleted: bool = False):
+    """Sync a single board item to Google Calendar (if AMUX_GCAL_ID is set).
+    Creates, updates, or deletes the corresponding GCal event."""
+    if not _GCAL_ID:
+        return
+    try:
+        import google.auth, google.auth.transport.requests
+        from googleapiclient.discovery import build
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/calendar"])
+        creds.refresh(google.auth.transport.requests.Request())
+        service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        db = get_db()
+        row = db.execute("SELECT gcal_event_id, due FROM issues WHERE id=?", (item_id,)).fetchone()
+        if not row:
+            return
+        event_id = row["gcal_event_id"] if row else None
+        # Delete: remove from GCal if item is deleted/done or has no due date
+        if deleted or not due or status == "done":
+            if event_id:
+                try:
+                    service.events().delete(calendarId=_GCAL_ID, eventId=event_id).execute()
+                    slog(f"[gcal] deleted event {event_id} for {item_id}")
+                except Exception:
+                    pass
+                db.execute("UPDATE issues SET gcal_event_id=NULL WHERE id=?", (item_id,))
+                db.commit()
+            return
+        # Build event body
+        event_body = {
+            "summary": title,
+            "description": f"amux board: {item_id}\n{desc}" if desc else f"amux board: {item_id}",
+        }
+        if due_time:
+            # Timed event
+            from datetime import datetime as _dt
+            start_dt = _dt.strptime(f"{due}T{due_time}", "%Y-%m-%dT%H:%M")
+            end_dt = start_dt + __import__("datetime").timedelta(hours=1)
+            event_body["start"] = {"dateTime": start_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "America/New_York"}
+            event_body["end"] = {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "America/New_York"}
+        else:
+            # All-day event
+            event_body["start"] = {"date": due}
+            event_body["end"] = {"date": due}
+        if event_id:
+            # Update existing
+            event = service.events().update(calendarId=_GCAL_ID, eventId=event_id, body=event_body).execute()
+            slog(f"[gcal] updated event {event_id} for {item_id}")
+        else:
+            # Create new
+            event = service.events().insert(calendarId=_GCAL_ID, body=event_body).execute()
+            event_id = event["id"]
+            db.execute("UPDATE issues SET gcal_event_id=? WHERE id=?", (event_id, item_id))
+            db.commit()
+            slog(f"[gcal] created event {event_id} for {item_id}")
+    except Exception as e:
+        slog(f"[gcal] sync failed for {item_id}: {e}")
+
+
 
 def _cron_next_run(parts: list, base) -> str | None:
     """Compute next fire time for a 5-field cron spec (MIN HOUR DOM MON DOW)."""
@@ -3117,6 +3179,11 @@ def _push_ical_bg():
     """Trigger S3 iCal upload in a background thread."""
     if _S3_BUCKET:
         threading.Thread(target=_upload_ical_to_s3, daemon=True).start()
+
+def _gcal_sync_bg(item_id, **kwargs):
+    """Trigger Google Calendar sync for a single item in a background thread."""
+    if _GCAL_ID:
+        threading.Thread(target=_gcal_sync_item, args=(item_id,), kwargs=kwargs, daemon=True).start()
 
 
 def get_daily_token_stats() -> dict:
@@ -27232,6 +27299,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 _sse_cache["board"]["time"] = 0  # invalidate SSE cache
                 item = _item_by_id(item_id)
                 _push_ical_bg()
+                if due:
+                    _gcal_sync_bg(item_id, title=title, due=due, due_time=due_time or "", desc=desc, status=status)
                 _req_tl.event = {"type": "board", "action": "created", "target": item_id,
                                  "session": session, "detail": f"{item_id}: {title}"}
                 return self._json(item, 201)
@@ -27239,6 +27308,9 @@ class CCHandler(BaseHTTPRequestHandler):
             # POST /api/board/clear-done — soft-delete all done issues
             if method == "POST" and path == "/api/board/clear-done":
                 now = int(time.time())
+                done_ids = [r["id"] for r in db.execute(
+                    "SELECT id FROM issues WHERE status = 'done' AND deleted IS NULL"
+                ).fetchall()]
                 db.execute(
                     "UPDATE issues SET deleted = ? WHERE status = 'done' AND deleted IS NULL", (now,)
                 )
@@ -27248,6 +27320,8 @@ class CCHandler(BaseHTTPRequestHandler):
                     "SELECT COUNT(*) FROM issues WHERE deleted IS NULL"
                 ).fetchone()[0]
                 _push_ical_bg()
+                for did in done_ids:
+                    _gcal_sync_bg(did, deleted=True)
                 return self._json({"ok": True, "remaining": remaining})
 
             # PUT /api/board/statuses/reorder — reorder columns
@@ -27384,7 +27458,13 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.commit()
                     _sse_cache["board"]["time"] = 0
                     _push_ical_bg()
-                    return self._json(_item_by_id(bid))
+                    updated_item = _item_by_id(bid)
+                    _gcal_sync_bg(bid, title=updated_item.get("title", ""),
+                                  due=updated_item.get("due", "") or "",
+                                  due_time=updated_item.get("due_time", "") or "",
+                                  desc=updated_item.get("desc", ""),
+                                  status=updated_item.get("status", ""))
+                    return self._json(updated_item)
 
                 if method == "DELETE":
                     now = int(time.time())
@@ -27392,6 +27472,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     db.commit()
                     _sse_cache["board"]["time"] = 0
                     _push_ical_bg()
+                    _gcal_sync_bg(bid, deleted=True)
                     return self._json({"ok": True, "deleted": bid})
 
             return self._json({"error": "not found"}, 404)
