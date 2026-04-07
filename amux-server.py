@@ -9032,6 +9032,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="notes-mode-tabs" id="notes-mode-tabs" style="display:none;">
       <button class="notes-mode-tab" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
       <button class="notes-mode-tab active" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
+      <button class="notes-mode-tab" id="notes-tab-teleprompter" onclick="_notesOpenTeleprompter()" title="Teleprompter mode">&#x25B6; Teleprompter</button>
       <div id="notes-preview-search" style="display:none;margin-left:auto;display:none;align-items:center;gap:4px;">
         <input id="notes-preview-search-input" type="text" placeholder="Search in preview..." oninput="_notesPreviewSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();event.shiftKey?_notesPreviewSearchNav(-1):_notesPreviewSearchNav(1);}" style="font-size:0.75rem;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);width:160px;outline:none;">
         <span id="notes-preview-search-count" style="font-size:0.68rem;color:var(--dim);min-width:36px;text-align:center;"></span>
@@ -9427,6 +9428,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Teleprompter overlay -->
+<div id="teleprompter-overlay" style="display:none;position:fixed;inset:0;z-index:10002;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+  <div id="tp-viewport" style="position:absolute;inset:0;overflow:hidden;">
+    <div id="tp-content" style="position:absolute;top:0;left:50%;transform:translate(-50%,0);max-width:70ch;width:90%;font-size:48px;line-height:1.5;font-weight:600;padding:50vh 20px;will-change:transform;"></div>
+  </div>
+  <!-- Reading line at 33% -->
+  <div id="tp-reading-line" style="position:absolute;top:33%;left:0;right:0;height:2px;background:linear-gradient(to right,transparent,#fbbf24 20%,#fbbf24 80%,transparent);pointer-events:none;opacity:0.5;"></div>
+  <!-- Top-right close -->
+  <button onclick="_notesCloseTeleprompter()" style="position:absolute;top:14px;right:18px;background:rgba(0,0,0,0.5);border:1px solid #444;border-radius:6px;color:#fff;padding:6px 12px;font-size:0.9rem;cursor:pointer;z-index:2;">&#x2715; Close</button>
+  <!-- Bottom toolbar -->
+  <div id="tp-toolbar" style="position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(20,20,30,0.92);backdrop-filter:blur(8px);border:1px solid #333;border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:0.85rem;transition:opacity 0.3s;z-index:2;flex-wrap:wrap;justify-content:center;max-width:calc(100% - 40px);">
+    <button id="tp-play" onclick="_tpToggle()" style="background:#7c6fcd;border:none;color:#fff;width:40px;height:40px;border-radius:50%;font-size:1.1rem;cursor:pointer;">&#x25B6;</button>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span style="color:#aaa;font-size:0.75rem;">WPM</span>
+      <input id="tp-wpm" type="range" min="60" max="400" step="5" value="150" oninput="_tpSetWpm(this.value)" style="width:120px;accent-color:#7c6fcd;">
+      <span id="tp-wpm-val" style="min-width:32px;font-variant-numeric:tabular-nums;">150</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;">
+      <span style="color:#aaa;font-size:0.75rem;">Size</span>
+      <input id="tp-size" type="range" min="24" max="96" step="2" value="48" oninput="_tpSetSize(this.value)" style="width:80px;accent-color:#7c6fcd;">
+    </div>
+    <button onclick="_tpRestart()" title="Restart (R)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">&#x21BB;</button>
+    <button id="tp-mirror-btn" onclick="_tpToggleMirror()" title="Mirror (M)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">Mirror</button>
+    <button onclick="_tpFullscreen()" title="Fullscreen (F)" style="background:none;border:1px solid #555;color:#fff;padding:6px 10px;border-radius:5px;cursor:pointer;">&#x26F6;</button>
   </div>
 </div>
 
@@ -22509,6 +22537,170 @@ function _notesPreviewBindCheckboxes(container) {
       _notesSaveDebounce();
     };
   });
+}
+
+// ── Teleprompter ──
+let _tp = { running: false, y: 0, wpm: 150, size: 48, mirror: false, lastT: 0, raf: null, toolbarTimer: null };
+
+function _notesOpenTeleprompter() {
+  // Render current note's content as the teleprompter script
+  const overlay = document.getElementById('teleprompter-overlay');
+  const content = document.getElementById('tp-content');
+  if (!_quill) return;
+  // Use rendered HTML from Quill (handles markdown the user pasted into the editor)
+  const rawIsHtml = /<[a-z][\s\S]*>/i.test(_notesRawContent);
+  let html;
+  if (rawIsHtml) {
+    html = _quill.root.innerHTML;
+  } else {
+    // Plain text / markdown: render minimally
+    html = _tpRenderMarkdown(_notesRawContent || _quill.getText());
+  }
+  content.innerHTML = html;
+  // Restore saved settings
+  try {
+    const saved = JSON.parse(localStorage.getItem('amux_tp_settings') || '{}');
+    _tp.wpm = saved.wpm || 150;
+    _tp.size = saved.size || 48;
+    _tp.mirror = !!saved.mirror;
+  } catch(e) {}
+  document.getElementById('tp-wpm').value = _tp.wpm;
+  document.getElementById('tp-wpm-val').textContent = _tp.wpm;
+  document.getElementById('tp-size').value = _tp.size;
+  content.style.fontSize = _tp.size + 'px';
+  _tp.y = 0;
+  content.style.transform = 'translate(-50%, 0px)' + (_tp.mirror ? ' scaleX(-1)' : '');
+  _tp.running = false;
+  document.getElementById('tp-play').innerHTML = '&#x25B6;';
+  overlay.style.display = 'block';
+  _tpShowToolbar();
+  document.addEventListener('keydown', _tpKeyHandler);
+  document.getElementById('tp-viewport').addEventListener('mousemove', _tpShowToolbar);
+  document.getElementById('tp-viewport').addEventListener('wheel', _tpWheelScroll, { passive: false });
+}
+
+function _notesCloseTeleprompter() {
+  _tp.running = false;
+  if (_tp.raf) cancelAnimationFrame(_tp.raf);
+  _tp.raf = null;
+  document.getElementById('teleprompter-overlay').style.display = 'none';
+  document.removeEventListener('keydown', _tpKeyHandler);
+  clearTimeout(_tp.toolbarTimer);
+  try {
+    localStorage.setItem('amux_tp_settings', JSON.stringify({ wpm: _tp.wpm, size: _tp.size, mirror: _tp.mirror }));
+  } catch(e) {}
+  if (document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+}
+
+function _tpRenderMarkdown(text) {
+  // Minimal markdown → HTML for teleprompter (headers, bold, italic, lists, paragraphs)
+  const esc = (s) => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const lines = text.split('\n');
+  const out = [];
+  let inList = false;
+  for (let raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { if (inList) { out.push('</ul>'); inList = false; } out.push('<br>'); continue; }
+    let m;
+    if ((m = line.match(/^(#{1,3})\s+(.+)$/))) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      const lvl = m[1].length;
+      out.push(`<h${lvl} style="font-size:${1.4 - (lvl-1)*0.15}em;margin:0.8em 0 0.3em;">${_tpInline(esc(m[2]))}</h${lvl}>`);
+    } else if ((m = line.match(/^[-*+]\s+(.+)$/))) {
+      if (!inList) { out.push('<ul style="padding-left:1.2em;margin:0.3em 0;">'); inList = true; }
+      out.push('<li>' + _tpInline(esc(m[1])) + '</li>');
+    } else {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<p style="margin:0.4em 0;">' + _tpInline(esc(line)) + '</p>');
+    }
+  }
+  if (inList) out.push('</ul>');
+  return out.join('\n');
+}
+function _tpInline(s) {
+  return s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>')
+          .replace(/`([^`]+)`/g, '<code style="font-family:monospace;font-size:0.9em;opacity:0.85;">$1</code>');
+}
+
+function _tpToggle() {
+  _tp.running = !_tp.running;
+  document.getElementById('tp-play').innerHTML = _tp.running ? '&#x23F8;' : '&#x25B6;';
+  if (_tp.running) {
+    _tp.lastT = performance.now();
+    _tp.raf = requestAnimationFrame(_tpTick);
+  } else if (_tp.raf) {
+    cancelAnimationFrame(_tp.raf);
+    _tp.raf = null;
+  }
+}
+
+function _tpTick(t) {
+  if (!_tp.running) return;
+  const dt = Math.min((t - _tp.lastT) / 1000, 0.1); // clamp to 100ms
+  _tp.lastT = t;
+  // WPM → pixels/sec. Assume avg 5 chars/word and font-size px ≈ line-height * 1 word per char ratio.
+  // Empirically: pxPerSec ≈ (wpm / 60) * fontSize * 1.5 (line-height multiplier)
+  const pxPerSec = (_tp.wpm / 60) * _tp.size * 1.5;
+  _tp.y += pxPerSec * dt;
+  const content = document.getElementById('tp-content');
+  const viewport = document.getElementById('tp-viewport');
+  if (!content || !viewport) return;
+  // Stop at end
+  const maxY = content.scrollHeight - viewport.clientHeight + viewport.clientHeight * 0.5;
+  if (_tp.y > maxY) { _tp.y = maxY; _tp.running = false; document.getElementById('tp-play').innerHTML = '&#x25B6;'; return; }
+  content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+  _tp.raf = requestAnimationFrame(_tpTick);
+}
+
+function _tpSetWpm(v) {
+  _tp.wpm = parseInt(v);
+  document.getElementById('tp-wpm-val').textContent = _tp.wpm;
+}
+function _tpSetSize(v) {
+  _tp.size = parseInt(v);
+  document.getElementById('tp-content').style.fontSize = _tp.size + 'px';
+}
+function _tpRestart() {
+  _tp.y = 0;
+  const content = document.getElementById('tp-content');
+  content.style.transform = 'translate(-50%, 0px)' + (_tp.mirror ? ' scaleX(-1)' : '');
+}
+function _tpToggleMirror() {
+  _tp.mirror = !_tp.mirror;
+  const content = document.getElementById('tp-content');
+  content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+  document.getElementById('tp-mirror-btn').style.background = _tp.mirror ? '#7c6fcd' : 'none';
+}
+function _tpFullscreen() {
+  const el = document.getElementById('teleprompter-overlay');
+  if (!document.fullscreenElement) el.requestFullscreen?.().catch(()=>{});
+  else document.exitFullscreen?.();
+}
+function _tpWheelScroll(e) {
+  e.preventDefault();
+  _tp.y = Math.max(0, _tp.y + e.deltaY);
+  const content = document.getElementById('tp-content');
+  if (content) content.style.transform = `translate(-50%, ${-_tp.y}px)` + (_tp.mirror ? ' scaleX(-1)' : '');
+}
+function _tpShowToolbar() {
+  const tb = document.getElementById('tp-toolbar');
+  if (!tb) return;
+  tb.style.opacity = '1';
+  clearTimeout(_tp.toolbarTimer);
+  _tp.toolbarTimer = setTimeout(() => { tb.style.opacity = '0'; }, 3000);
+}
+function _tpKeyHandler(e) {
+  if (document.getElementById('teleprompter-overlay').style.display === 'none') return;
+  if (e.key === ' ') { e.preventDefault(); _tpToggle(); _tpShowToolbar(); }
+  else if (e.key === 'Escape') { _notesCloseTeleprompter(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); _tp.wpm = Math.min(400, _tp.wpm + 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
+  else if (e.key === 'ArrowDown') { e.preventDefault(); _tp.wpm = Math.max(60, _tp.wpm - 10); document.getElementById('tp-wpm').value = _tp.wpm; document.getElementById('tp-wpm-val').textContent = _tp.wpm; _tpShowToolbar(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); _tp.y = Math.max(0, _tp.y - (_tp.wpm / 60) * _tp.size * 1.5 * 10); _tpTick(performance.now()); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); _tp.y += (_tp.wpm / 60) * _tp.size * 1.5 * 10; _tpTick(performance.now()); }
+  else if (e.key === 'f' || e.key === 'F') { _tpFullscreen(); }
+  else if (e.key === 'm' || e.key === 'M') { _tpToggleMirror(); _tpShowToolbar(); }
+  else if (e.key === 'r' || e.key === 'R') { _tpRestart(); _tpShowToolbar(); }
 }
 
 function _notesSwitchMode(mode) {
