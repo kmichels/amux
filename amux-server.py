@@ -12480,11 +12480,20 @@ async function doStop(name) {
 
 async function doRestart(name) {
   await apiCall(API + '/api/sessions/' + name + '/stop', { method: 'POST' });
-  // Poll until stopped (up to 5s)
+  // Poll until stopped (up to 5s). If it never stops, bail out instead of
+  // racing doStart against a still-running session.
+  let stopped = false;
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 500));
     await fetchSessions();
-    if (!sessions.find(s => s.name === name && s.running)) break;
+    if (!sessions.find(s => s.name === name && s.running)) {
+      stopped = true;
+      break;
+    }
+  }
+  if (!stopped) {
+    showToast("Stop didn't take effect, try again");
+    return;
   }
   await doStart(name);
 }
