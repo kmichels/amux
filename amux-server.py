@@ -2238,6 +2238,7 @@ def _init_db():
         "ALTER TABLE schedules ADD COLUMN done_action TEXT NOT NULL DEFAULT 'disable'",
         "ALTER TABLE graph_nodes ADD COLUMN source_path TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE issues ADD COLUMN gcal_event_id TEXT",
+        "ALTER TABLE issues ADD COLUMN pos REAL NOT NULL DEFAULT 0",
         "ALTER TABLE schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'tmux'",
     ]:
         try:
@@ -2757,12 +2758,16 @@ def _load_board() -> list:
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
                   COALESCE(i.pinned, 0) AS pinned,
+                  COALESCE(i.pos, 0) AS pos,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
            WHERE i.deleted IS NULL
            GROUP BY i.id
-           ORDER BY COALESCE(i.pinned, 0) DESC, i.updated DESC"""
+           ORDER BY COALESCE(i.pinned, 0) DESC,
+                    CASE WHEN COALESCE(i.pos, 0) = 0 THEN 1 ELSE 0 END,
+                    COALESCE(i.pos, 0) ASC,
+                    i.updated DESC"""
     ).fetchall()
     result = []
     for row in rows:
@@ -2787,6 +2792,7 @@ def _item_by_id(bid: str) -> dict | None:
         """SELECT i.id, i.title, i.desc, i.status, i.session, i.creator,
                   i.due, i.due_time, i.created, i.updated, i.owner_type,
                   COALESCE(i.pinned, 0) AS pinned,
+                  COALESCE(i.pos, 0) AS pos,
                   GROUP_CONCAT(t.tag) AS tags_csv
            FROM issues i
            LEFT JOIN issue_tags t ON t.issue_id = i.id
@@ -18760,7 +18766,16 @@ function renderBoard() {
     if (stCol.length === 0) {
       html += '<div class="board-empty">Nothing here</div>';
     }
-    stCol.sort((a, b) => (b.pinned || 0) - (a.pinned || 0));
+    stCol.sort((a, b) => {
+      const pp = (b.pinned || 0) - (a.pinned || 0);
+      if (pp !== 0) return pp;
+      const ap = a.pos || 0, bp = b.pos || 0;
+      // Items without a pos (=0) sort to the bottom, ordered by recency
+      if (ap === 0 && bp === 0) return (b.updated || 0) - (a.updated || 0);
+      if (ap === 0) return 1;
+      if (bp === 0) return -1;
+      return ap - bp;
+    });
     const PAGE_SIZE = 20;
     const showCount = _boardColPages[st] || PAGE_SIZE;
     const visibleCards = stCol.slice(0, showCount);
@@ -18833,10 +18848,28 @@ function renderBoard() {
           document.body.classList.remove('board-dragging');
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
-          if (id && newStatus) {
-            const item = boardItems.find(i => i.id === id);
-            if (item && item.status !== newStatus) moveBoardItem(id, newStatus);
+          if (!id || !newStatus) {
+            if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
+            return;
           }
+          // Compute fractional position from DOM neighbors in the destination column
+          const cards = [...evt.to.querySelectorAll('.board-card[data-id]')];
+          const myIdx = cards.findIndex(el => el.dataset.id === id);
+          const prevEl = myIdx > 0 ? cards[myIdx - 1] : null;
+          const nextEl = myIdx >= 0 && myIdx < cards.length - 1 ? cards[myIdx + 1] : null;
+          const prevItem = prevEl ? boardItems.find(i => i.id === prevEl.dataset.id) : null;
+          const nextItem = nextEl ? boardItems.find(i => i.id === nextEl.dataset.id) : null;
+          const prevPos = prevItem && prevItem.pos ? prevItem.pos : null;
+          const nextPos = nextItem && nextItem.pos ? nextItem.pos : null;
+          let newPos;
+          if (prevPos != null && nextPos != null) newPos = (prevPos + nextPos) / 2;
+          else if (prevPos != null) newPos = prevPos + 1024;
+          else if (nextPos != null) newPos = nextPos - 1024;
+          else newPos = Date.now() / 1000;  // empty column — seed from time
+          const item = boardItems.find(i => i.id === id);
+          const statusChanged = item && item.status !== newStatus;
+          const posChanged = !item || item.pos !== newPos;
+          if (statusChanged || posChanged) moveBoardItem(id, newStatus, newPos);
           // Flush any renderBoard() calls that were deferred during the drag
           if (_boardRenderPending) { _boardRenderPending = false; renderBoard(); }
         }
@@ -19306,15 +19339,21 @@ async function deleteBoardItem(id) {
   await apiCall(API + '/api/board/' + id, { method: 'DELETE' });
 }
 
-function moveBoardItem(id, newStatus) {
+function moveBoardItem(id, newStatus, newPos) {
   // Optimistic: update in-memory + cache immediately; Sortable already moved the DOM
   const idx = boardItems.findIndex(i => i.id === id);
-  if (idx >= 0) boardItems[idx] = { ...boardItems[idx], status: newStatus, updated: Math.floor(Date.now() / 1000) };
+  if (idx >= 0) {
+    const patch = { status: newStatus, updated: Math.floor(Date.now() / 1000) };
+    if (typeof newPos === 'number' && isFinite(newPos)) patch.pos = newPos;
+    boardItems[idx] = { ...boardItems[idx], ...patch };
+  }
   saveBoardCache();
   // Sync to backend silently — no renderBoard() so the drag stays smooth
+  const body = { status: newStatus };
+  if (typeof newPos === 'number' && isFinite(newPos)) body.pos = newPos;
   apiCall(API + '/api/board/' + id, {
     method: 'PATCH', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ status: newStatus })
+    body: JSON.stringify(body)
   }).then(r => {
     if (!r) return;
     r.json().then(updated => {
@@ -27826,10 +27865,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 owner_type = body.get("owner_type", "agent" if session else "human")
                 if owner_type not in ("human", "agent"):
                     owner_type = "human"
+                # Place new card at top of its column: pos = (min existing pos) - 1
+                min_pos_row = db.execute(
+                    "SELECT COALESCE(MIN(NULLIF(pos, 0)), 0) AS m FROM issues WHERE status = ? AND deleted IS NULL",
+                    (status,),
+                ).fetchone()
+                new_pos = (min_pos_row["m"] if min_pos_row else 0) - 1024.0
                 db.execute(
-                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type),
+                    """INSERT INTO issues (id, title, desc, status, session, creator, due, due_time, created, updated, owner_type, pos)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (item_id, title, desc, status, session or None, creator, due, due_time, now, now, owner_type, new_pos),
                 )
                 for tag in tags:
                     db.execute(
@@ -27989,7 +28034,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     body = self._read_body()
                     now = int(time.time())
                     set_clauses, params = [], []
-                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned"):
+                    for k in ("title", "desc", "status", "session", "due", "due_time", "owner_type", "pinned", "pos"):
                         if k in body:
                             set_clauses.append(f"{k} = ?")
                             v = body[k]
