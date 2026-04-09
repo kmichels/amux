@@ -10005,6 +10005,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
+    <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules</button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -10124,6 +10125,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
     </div>
+  </div>
+  <!-- Schedules panel -->
+  <div id="peek-schedules-panel" class="peek-tasks-panel">
+    <div class="peek-tasks-add" style="gap:10px;">
+      <span id="peek-schedules-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNewSchedule()">+ New schedule</button>
+    </div>
+    <div class="peek-tasks-list" id="peek-schedules-list"></div>
   </div>
 </div>
 
@@ -12700,6 +12709,7 @@ function setPeekTab(tab) {
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
   document.getElementById('peek-tab-commits').classList.toggle('active', tab === 'commits');
+  document.getElementById('peek-tab-schedules').classList.toggle('active', tab === 'schedules');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
@@ -12710,6 +12720,9 @@ function setPeekTab(tab) {
   const commits = document.getElementById('peek-commits-panel');
   if (tab === 'commits') { commits.classList.add('active'); _commitsLoad(); }
   else { commits.classList.remove('active'); }
+  const scheds = document.getElementById('peek-schedules-panel');
+  if (tab === 'schedules') { scheds.classList.add('active'); _peekLoadSchedules(); }
+  else { scheds.classList.remove('active'); }
 }
 
 // ── Commits panel ──
@@ -13144,6 +13157,82 @@ function renderPeekIssues() {
       '</div>';
   }).join('');
 }
+// ── Peek Schedules (scheduler tasks for this session) ────────────────────────
+async function _peekLoadSchedules() {
+  const list = document.getElementById('peek-schedules-list');
+  const count = document.getElementById('peek-schedules-count');
+  if (!peekSession) return;
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Loading…</div>';
+  try {
+    const r = await fetch(API + '/api/schedules');
+    const all = await r.json();
+    const items = all.filter(s => s.session === peekSession && !s.deleted);
+    count.textContent = items.length ? items.length + ' schedule' + (items.length === 1 ? '' : 's') : '';
+    if (!items.length) {
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No schedules for this session.</div>';
+      return;
+    }
+    list.innerHTML = items.map(s => {
+      const enabled = s.enabled ? 'enabled' : 'disabled';
+      const ebg = s.enabled ? 'rgba(63,185,80,0.15)' : 'rgba(139,148,158,0.15)';
+      const ecol = s.enabled ? '#3fb950' : 'var(--dim)';
+      const badge = '<span style="font-size:0.7rem;padding:1px 6px;border-radius:10px;background:' + ebg + ';color:' + ecol + ';">' + enabled + '</span>';
+      const stype = s.sched_type === 'recurring' ? (s.schedule_expr || 'recurring') : (s.run_at || 'once');
+      const nextRun = s.next_run ? '<span style="color:var(--dim);font-size:0.75rem;">next: ' + esc(s.next_run) + '</span>' : '';
+      const lastRun = s.last_run ? '<span style="color:var(--dim);font-size:0.75rem;">last: ' + esc(s.last_run) + '</span>' : '';
+      return '<div class="peek-issue-item" style="cursor:default;">' +
+        '<span class="peek-issue-key">' + esc(s.id) + '</span>' +
+        '<span class="peek-issue-title">' + esc(s.title || s.command || '(untitled)') + '</span>' +
+        '<span class="peek-issue-meta" style="gap:6px;">' + badge +
+          '<span style="font-size:0.72rem;color:var(--dim);font-family:monospace;">' + esc(stype) + '</span>' +
+          nextRun + lastRun +
+        '</span>' +
+        '<div style="display:flex;gap:4px;margin-top:4px;">' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekToggleSchedule(\'' + esc(s.id) + '\',' + (s.enabled ? 0 : 1) + ')">' + (s.enabled ? 'Disable' : 'Enable') + '</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="event.stopPropagation();_peekRunSchedule(\'' + esc(s.id) + '\')">Run now</button>' +
+          '<button class="btn" style="font-size:0.7rem;padding:2px 8px;color:var(--red);" onclick="event.stopPropagation();_peekDeleteSchedule(\'' + esc(s.id) + '\')">Delete</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Failed to load schedules.</div>';
+  }
+}
+async function _peekToggleSchedule(id, val) {
+  await apiCall(API + '/api/schedules/' + id, {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: val })
+  });
+  _peekLoadSchedules();
+}
+async function _peekRunSchedule(id) {
+  await apiCall(API + '/api/schedules/' + id + '/run', { method: 'POST' });
+  showToast('Schedule triggered');
+  _peekLoadSchedules();
+}
+async function _peekDeleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  await apiCall(API + '/api/schedules/' + id, { method: 'DELETE' });
+  _peekLoadSchedules();
+}
+function _peekNewSchedule() {
+  const title = prompt('Schedule title:');
+  if (!title) return;
+  const command = prompt('Command to send to session:');
+  if (!command) return;
+  const expr = prompt('Cron expression (e.g. "0 9 * * 1" for Mon 9am), or leave blank for one-time:');
+  const body = {
+    title, session: peekSession, command, kind: 'tmux',
+    sched_type: expr ? 'recurring' : 'once',
+  };
+  if (expr) body.schedule_expr = expr;
+  else body.run_at = new Date().toISOString().slice(0, 16);
+  apiCall(API + '/api/schedules', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(() => _peekLoadSchedules());
+}
+
 function peekMemoryTab(tab) {
   document.getElementById('pm-tab-edit').classList.toggle('active', tab === 'edit');
   document.getElementById('pm-tab-preview').classList.toggle('active', tab === 'preview');
@@ -13278,6 +13367,7 @@ function openPeek(name, opts) {
   document.getElementById('peek-memory-panel').classList.remove('active');
   document.getElementById('peek-git-panel').classList.remove('active');
   document.getElementById('peek-commits-panel').classList.remove('active');
+  document.getElementById('peek-schedules-panel').classList.remove('active');
   // Update dir bar
   document.getElementById('peek-dir-text').textContent = peekSessionDir || '(unknown)';
   const prefillQuery = opts && opts.query ? opts.query : '';
