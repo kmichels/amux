@@ -703,6 +703,8 @@ def _classify_request(method: str, path: str) -> tuple:
         return ("file", "uploaded", "", "")
     if path == "/api/fs/upload" and method == "POST":
         return ("file", "uploaded", "", "")
+    if path == "/api/fs/delete" and method == "DELETE":
+        return ("file", "deleted", "", "")
     # System
     if path == "/api/pull" and method == "POST":
         return ("system", "pull", "repo", "")
@@ -16067,6 +16069,23 @@ function _showExploreMenu(path, btn, type) {
   copyItem.textContent = 'Copy path';
   copyItem.onclick = () => { popup.remove(); _copyExplorePath(path); };
   popup.appendChild(copyItem);
+  // Delete
+  const delItem = document.createElement('button');
+  delItem.className = 'explore-menu-item';
+  delItem.style.color = 'var(--red, #f85149)';
+  delItem.textContent = type === 'directory' ? 'Delete folder' : 'Delete file';
+  delItem.onclick = async () => {
+    popup.remove();
+    const name = path.split('/').pop();
+    if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+    try {
+      const r = await fetch(API + '/api/fs/delete', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ path }) });
+      const d = await r.json();
+      if (r.ok) { showToast('Deleted ' + name); loadExplore(_explorePath); }
+      else showToast('Delete failed: ' + (d.error || r.status));
+    } catch(e) { showToast('Delete error: ' + e.message); }
+  };
+  popup.appendChild(delItem);
   document.body.appendChild(popup);
   // Position near button
   const r = btn.getBoundingClientRect();
@@ -28020,6 +28039,27 @@ class CCHandler(BaseHTTPRequestHandler):
                 dest.write_bytes(data)
                 saved.append({"name": dest.name, "size": len(data)})
             return self._json({"saved": saved})
+
+        # ── File/directory delete ──
+        if method == "DELETE" and path == "/api/fs/delete":
+            data = self._read_body()
+            target_path = data.get("path", "")
+            if not target_path:
+                return self._json({"error": "missing 'path'"}, 400)
+            target = Path(target_path).expanduser().resolve()
+            if not _is_path_allowed(target):
+                return self._json({"error": "access denied"}, 403)
+            if not target.exists():
+                return self._json({"error": "not found"}, 404)
+            try:
+                if target.is_dir():
+                    import shutil as _shutil
+                    _shutil.rmtree(str(target))
+                else:
+                    target.unlink()
+                return self._json({"ok": True, "deleted": str(target)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
 
         # ── File upload ──
         if method == "POST" and path == "/api/upload":
