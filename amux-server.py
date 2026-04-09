@@ -8126,13 +8126,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .notes-mode-tab.active { background: rgba(88,166,255,0.12); color: var(--accent); }
   .notes-mode-tab:not(.active):hover { background: rgba(139,148,158,0.08); color: var(--text); }
-  /* Preview pane */
+  /* Preview pane — matches .ql-editor padding/max-width so content
+     stays in the exact same position when toggling Edit ↔ Preview */
   .notes-preview {
-    flex: 1; overflow-y: auto; padding: 20px 24px 80px; background: var(--bg);
+    flex: 1; overflow-y: auto; padding: 12px 24px 80px; background: var(--bg);
     display: none; color: var(--text); font-size: 0.92rem; line-height: 1.75;
     box-sizing: border-box; cursor: text; width: 100%;
   }
-  .notes-preview > * { max-width: 760px; margin-left: auto; margin-right: auto; }
+  .notes-preview > * { max-width: 740px; margin-left: auto; margin-right: auto; }
   .notes-preview > h1:first-child, .notes-preview > h2:first-child { margin-top: 0; }
   .notes-preview.active { display: block; }
   .notes-preview > *:first-child { margin-top: 0; }
@@ -22926,11 +22927,14 @@ function _notesPreviewBindCheckboxes(container) {
 function _notesPreviewBindTapToEdit(container) {
   if (container._tapToEditBound) return;
   container._tapToEditBound = true;
-  container.addEventListener('click', (e) => {
-    // Don't intercept link clicks, checkboxes, or text selection
+  // Make all links open in a new tab so dbl-click-to-edit doesn't navigate away.
+  container.querySelectorAll('a[href]').forEach(a => {
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener noreferrer');
+  });
+  container.addEventListener('dblclick', (e) => {
     if (e.target.closest('a')) return;
     if (e.target.closest('li[data-list="checked"], li[data-list="unchecked"]')) return;
-    if (window.getSelection && window.getSelection().toString().length > 0) return;
     _notesSwitchMode('edit');
     setTimeout(() => { if (_quill) _quill.focus(); }, 30);
   });
