@@ -7105,6 +7105,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Tasks panel */
   .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
+  #peek-notes-quill-wrap .ql-toolbar { flex-shrink: 0; border-color: var(--border); }
+  #peek-notes-quill-wrap .ql-container { flex: 1; min-height: 0; overflow-y: auto; border-color: var(--border); }
+  #peek-notes-quill-wrap .ql-editor { min-height: 100%; }
+  #peek-notes-editor-view { flex: 1; min-height: 0; }
   .peek-tasks-add { display: flex; gap: 8px; flex-shrink: 0; }
   .peek-tasks-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
   .peek-issue-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
@@ -10008,6 +10012,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
     <button class="peek-tab" id="peek-tab-schedules" onclick="setPeekTab('schedules')">Schedules</button>
+    <button class="peek-tab" id="peek-tab-notes" onclick="setPeekTab('notes')">Notes</button>
   </div>
   <!-- Working directory bar -->
   <div class="peek-dir-bar">
@@ -10135,6 +10140,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNewSchedule()">+ New schedule</button>
     </div>
     <div class="peek-tasks-list" id="peek-schedules-list"></div>
+  </div>
+  <!-- Notes panel -->
+  <div id="peek-notes-panel" class="peek-tasks-panel" style="flex-direction:column;">
+    <!-- List view -->
+    <div id="peek-notes-list-view">
+      <div class="peek-tasks-add" style="gap:10px;">
+        <span id="peek-notes-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+        <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNotesNew()">+ New note</button>
+      </div>
+      <div class="peek-tasks-list" id="peek-notes-list"></div>
+    </div>
+    <!-- Editor view (hidden until a note is opened) -->
+    <div id="peek-notes-editor-view" style="display:none;flex:1;flex-direction:column;min-height:0;">
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;flex-shrink:0;">
+        <button class="btn" style="font-size:0.75rem;padding:3px 10px;" onclick="_peekNotesBack()">&#x2190; Back</button>
+        <input id="peek-notes-title" type="text" placeholder="Note title…" style="flex:1;border:none;background:transparent;color:var(--text);font-size:0.9rem;font-weight:600;outline:none;min-width:0;"
+          oninput="_peekNotesTitleChange()" onblur="_peekNotesSaveDebounce()">
+        <span id="peek-notes-save-status" style="font-size:0.72rem;color:var(--dim);flex-shrink:0;"></span>
+        <button class="btn" style="font-size:0.75rem;padding:3px 10px;color:var(--red);" onclick="_peekNotesDelete()">Delete</button>
+      </div>
+      <div style="display:flex;gap:0;flex-shrink:0;border-bottom:1px solid var(--border);">
+        <button class="notes-mode-tab active" id="peek-notes-tab-edit" onclick="_peekNotesSwitchMode('edit')" style="font-size:0.78rem;padding:4px 12px;">Edit</button>
+        <button class="notes-mode-tab" id="peek-notes-tab-preview" onclick="_peekNotesSwitchMode('preview')" style="font-size:0.78rem;padding:4px 12px;">Preview</button>
+      </div>
+      <div id="peek-notes-quill-wrap" class="notes-quill-wrap" style="flex:1;min-height:0;overflow-y:auto;display:flex;">
+        <div id="peek-notes-quill"></div>
+      </div>
+      <div id="peek-notes-preview" class="notes-preview" style="flex:1;min-height:0;overflow-y:auto;display:none;"></div>
+    </div>
   </div>
 </div>
 
@@ -12707,11 +12741,16 @@ let _peekTab = 'terminal';
 let _peekGitData = null;
 function setPeekTab(tab) {
   _peekTab = tab;
+  // Flush peek notes save when switching away
+  if (tab !== 'notes' && _peekNotesSaveTimer) {
+    clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave();
+  }
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
   document.getElementById('peek-tab-commits').classList.toggle('active', tab === 'commits');
   document.getElementById('peek-tab-schedules').classList.toggle('active', tab === 'schedules');
+  document.getElementById('peek-tab-notes').classList.toggle('active', tab === 'notes');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
@@ -12725,6 +12764,9 @@ function setPeekTab(tab) {
   const scheds = document.getElementById('peek-schedules-panel');
   if (tab === 'schedules') { scheds.classList.add('active'); _peekLoadSchedules(); }
   else { scheds.classList.remove('active'); }
+  const notes = document.getElementById('peek-notes-panel');
+  if (tab === 'notes') { notes.classList.add('active'); _peekNotesLoad(); }
+  else { notes.classList.remove('active'); }
 }
 
 // ── Commits panel ──
@@ -13235,6 +13277,203 @@ function _peekNewSchedule() {
   }).then(() => _peekLoadSchedules());
 }
 
+// ── Peek notes ──
+let _peekNotesAll = [];
+let _peekNotesActive = null;
+let _peekQuill = null;
+let _peekNotesSaveTimer = null;
+let _peekNotesLoading = false;
+let _peekNotesMode = 'edit';
+
+function _peekNotesFolder() {
+  return '_sessions/' + peekSession;
+}
+
+async function _peekNotesLoad() {
+  const list = document.getElementById('peek-notes-list');
+  const count = document.getElementById('peek-notes-count');
+  if (!peekSession) return;
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Loading…</div>';
+  try {
+    const r = await fetch(API + '/api/notes');
+    const all = await r.json();
+    const folder = _peekNotesFolder() + '/';
+    _peekNotesAll = all.filter(n => n.path.startsWith(folder));
+    count.textContent = _peekNotesAll.length ? _peekNotesAll.length + ' note' + (_peekNotesAll.length === 1 ? '' : 's') : '';
+    if (!_peekNotesAll.length) {
+      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No notes for this session yet.</div>';
+      return;
+    }
+    list.innerHTML = _peekNotesAll.map(n => {
+      const updated = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
+      return '<div class="peek-issue-item" onclick="_peekNotesOpen(\'' + esc(n.path).replace(/'/g, "\\'") + '\')">' +
+        '<span class="peek-issue-title" style="flex:1;">' + esc(n.name || n.path) + '</span>' +
+        '<span style="font-size:0.72rem;color:var(--dim);">' + updated + '</span>' +
+      '</div>';
+    }).join('');
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Failed to load notes.</div>';
+  }
+}
+
+function _peekNotesInitQuill() {
+  if (_peekQuill) return;
+  _peekQuill = new Quill('#peek-notes-quill', {
+    theme: 'snow',
+    modules: {
+      toolbar: {
+        container: [
+          [{ header: [1, 2, 3, false] }],
+          ['bold', 'italic', 'underline', 'strike'],
+          ['blockquote', 'code-block'],
+          [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
+          ['link'],
+          ['clean']
+        ]
+      }
+    },
+    placeholder: 'Write your note…'
+  });
+  if (typeof QuillMarkdown !== 'undefined') {
+    try { new QuillMarkdown(_peekQuill); } catch(e) {}
+  }
+  _peekQuill.on('text-change', (delta, old, source) => {
+    if (source === 'api' || _peekNotesLoading) return;
+    // Sync H1 → title
+    const first = _peekQuill.root.firstElementChild;
+    if (first && first.tagName === 'H1') {
+      const h1 = first.textContent.trim();
+      const ti = document.getElementById('peek-notes-title');
+      if (ti && ti.value !== h1) ti.value = h1;
+    }
+    _peekNotesSaveDebounce();
+  });
+}
+
+async function _peekNotesOpen(path) {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesInitQuill();
+  document.getElementById('peek-notes-list-view').style.display = 'none';
+  const edView = document.getElementById('peek-notes-editor-view');
+  edView.style.display = 'flex';
+  document.getElementById('peek-notes-save-status').textContent = '';
+  const urlPath = path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  try {
+    const r = await fetch(API + '/api/notes/' + urlPath);
+    const data = await r.json();
+    _peekNotesActive = { path: data.path };
+    const h1html = (data.content || '').match(/<h1[^>]*>(.*?)<\/h1>/i);
+    const h1md = (data.content || '').match(/^#\s+(.+)$/m);
+    const title = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : path.replace(/\.md$/, '').split('/').pop());
+    _peekNotesActive.title = title;
+    document.getElementById('peek-notes-title').value = title;
+    _peekNotesLoading = true;
+    const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
+    if (isHtml) _peekQuill.root.innerHTML = data.content || '';
+    else _peekQuill.setText(data.content || '');
+    setTimeout(() => { _peekNotesLoading = false; }, 0);
+    _peekNotesSwitchMode('edit');
+  } catch(e) {
+    showToast('Failed to load note');
+    _peekNotesBack();
+  }
+}
+
+function _peekNotesBack() {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesActive = null;
+  document.getElementById('peek-notes-editor-view').style.display = 'none';
+  document.getElementById('peek-notes-list-view').style.display = '';
+  _peekNotesLoad();
+}
+
+async function _peekNotesNew() {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  const folder = _peekNotesFolder();
+  const existing = new Set(_peekNotesAll.map(n => n.path));
+  let filename = folder + '/untitled.md';
+  let displayName = 'Untitled';
+  if (existing.has(filename)) {
+    let i = 1;
+    while (existing.has(folder + '/untitled-' + i + '.md')) i++;
+    filename = folder + '/untitled-' + i + '.md';
+    displayName = 'Untitled ' + i;
+  }
+  const urlPath = filename.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
+  await apiCall(API + '/api/notes/' + urlPath, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ content: '<h1>' + displayName + '</h1>' })
+  });
+  await _peekNotesOpen(filename);
+  const ti = document.getElementById('peek-notes-title');
+  if (ti) { ti.focus(); ti.select(); }
+}
+
+function _peekNotesSaveDebounce() {
+  if (_peekNotesSaveTimer) clearTimeout(_peekNotesSaveTimer);
+  _peekNotesSaveTimer = setTimeout(_peekNotesSave, 400);
+}
+
+async function _peekNotesSave() {
+  if (!_peekNotesActive || !_peekQuill) return;
+  const content = _peekQuill.root.innerHTML === '<p><br></p>' ? '' : _peekQuill.root.innerHTML;
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  const statusEl = document.getElementById('peek-notes-save-status');
+  const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ content })
+  });
+  if (!result) { statusEl.textContent = '◐ Offline'; }
+  else { statusEl.textContent = '✓ Saved'; setTimeout(() => { if (statusEl.textContent === '✓ Saved') statusEl.textContent = ''; }, 2000); }
+}
+
+function _peekNotesTitleChange() {
+  if (!_peekNotesActive || !_peekQuill) return;
+  const newTitle = document.getElementById('peek-notes-title').value;
+  _peekNotesActive.title = newTitle;
+  const first = _peekQuill.root.firstElementChild;
+  const isH1 = first && first.tagName === 'H1';
+  const oldLen = isH1 ? first.textContent.length : 0;
+  if (isH1) {
+    if (oldLen > 0) _peekQuill.deleteText(0, oldLen, 'api');
+    if (newTitle) _peekQuill.insertText(0, newTitle, 'api');
+  } else {
+    _peekQuill.insertText(0, (newTitle || '') + '\n', 'api');
+    _peekQuill.formatLine(0, 1, 'header', 1, 'api');
+  }
+  _peekNotesSaveDebounce();
+}
+
+async function _peekNotesDelete() {
+  if (!_peekNotesActive) return;
+  if (!confirm('Delete "' + (_peekNotesActive.title || 'this note') + '"?')) return;
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+  _peekNotesActive = null;
+  document.getElementById('peek-notes-editor-view').style.display = 'none';
+  document.getElementById('peek-notes-list-view').style.display = '';
+  _peekNotesLoad();
+}
+
+function _peekNotesSwitchMode(mode) {
+  _peekNotesMode = mode;
+  document.getElementById('peek-notes-tab-edit').classList.toggle('active', mode === 'edit');
+  document.getElementById('peek-notes-tab-preview').classList.toggle('active', mode === 'preview');
+  const quillWrap = document.getElementById('peek-notes-quill-wrap');
+  const preview = document.getElementById('peek-notes-preview');
+  if (mode === 'preview') {
+    if (_peekQuill) {
+      preview.innerHTML = _peekQuill.root.innerHTML;
+      preview.classList.add('md-content');
+    }
+    preview.style.display = '';
+    quillWrap.style.display = 'none';
+  } else {
+    preview.style.display = 'none';
+    quillWrap.style.display = 'flex';
+  }
+}
+
 function peekMemoryTab(tab) {
   document.getElementById('pm-tab-edit').classList.toggle('active', tab === 'edit');
   document.getElementById('pm-tab-preview').classList.toggle('active', tab === 'preview');
@@ -13430,6 +13669,14 @@ function copyPeekContent() {
 }
 
 function closePeek() {
+  // Flush pending peek notes save
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesActive = null;
+  // Reset notes panel to list view for next open
+  const nev = document.getElementById('peek-notes-editor-view');
+  const nlv = document.getElementById('peek-notes-list-view');
+  if (nev) nev.style.display = 'none';
+  if (nlv) nlv.style.display = '';
   // Save command draft for this session
   if (peekSession) {
     const inp = document.getElementById('peek-cmd-input');
