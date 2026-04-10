@@ -4653,6 +4653,19 @@ def _ensure_memory(name: str, work_dir: str):
     _write_claude_memory(name, work_dir)
 
 
+def _get_default_model() -> str:
+    """Return the default model from defaults.env, or 'sonnet' as fallback."""
+    defaults_file = CC_HOME / "defaults.env"
+    if defaults_file.exists():
+        dcfg = parse_env_file(defaults_file)
+        flags = dcfg.get("CC_DEFAULT_FLAGS", "")
+        import re
+        m = re.search(r"--model\s+(\S+)", flags)
+        if m:
+            return m.group(1)
+    return "sonnet"
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
@@ -9017,6 +9030,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
+          <div class="settings-section-label">Default Model</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
+          <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
+            style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
+            <option value="sonnet">sonnet</option>
+            <option value="opus">opus</option>
+            <option value="haiku">haiku</option>
+            <option value="claude-opus-4-6">claude-opus-4-6</option>
+            <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+            <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+            <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
+            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+          </select>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section">
           <div class="settings-section-label">Appearance</div>
           <div class="settings-row" style="justify-content:space-between;align-items:center;">
             <span style="font-size:0.85rem;" id="theme-label">Dark mode</span>
@@ -10290,12 +10319,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
     <select id="edit-select" style="display:none;" onchange="submitEdit()">
-      <option value="">Default (sonnet)</option>
+      <option value="" id="model-default-opt">Default</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
+      <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+      <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
     <div class="edit-actions">
@@ -12378,6 +12409,12 @@ function closeAddMenu() {
   if (!addMenuOpen) return;
   document.getElementById('add-menu').classList.remove('open');
   addMenuOpen = false;
+}
+
+// ── Set default model label from server config ──
+if (window._AMUX_DEFAULT_MODEL) {
+  const defOpt = document.getElementById('model-default-opt');
+  if (defOpt) defOpt.textContent = 'Default (' + window._AMUX_DEFAULT_MODEL + ')';
 }
 
 // ── Edit modal ──
@@ -21884,6 +21921,7 @@ function toggleSettings() {
   const open = menu.classList.toggle('open');
   if (open) {
     _renderInstanceSwitcher();
+    loadDefaultModel();
     // Apply cloud identity (email) or device name
     _applyIdentityToSettings();
     if (!_cloudEmail) {
@@ -22000,6 +22038,34 @@ document.addEventListener('click', function(e) {
   const wrap = document.querySelector('.settings-wrap');
   if (wrap && !wrap.contains(e.target)) closeSettings();
 });
+
+// ── Default Model ────────────────────────────────────────────────────────────
+function loadDefaultModel() {
+  const sel = document.getElementById('settings-default-model');
+  if (sel && window._AMUX_DEFAULT_MODEL) {
+    if (!Array.from(sel.options).some(o => o.value === window._AMUX_DEFAULT_MODEL)) {
+      const opt = document.createElement('option');
+      opt.value = window._AMUX_DEFAULT_MODEL;
+      opt.textContent = window._AMUX_DEFAULT_MODEL;
+      sel.appendChild(opt);
+    }
+    sel.value = window._AMUX_DEFAULT_MODEL;
+  }
+}
+async function saveDefaultModel(val) {
+  try {
+    const r = await fetch('/api/settings/default-model', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: val})
+    });
+    if (r.ok) {
+      window._AMUX_DEFAULT_MODEL = val;
+      const defOpt = document.getElementById('model-default-opt');
+      if (defOpt) defOpt.textContent = 'Default (' + val + ')';
+      showToast('Default model: ' + val);
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
 
 // ── API Keys ───────────────────────────────────────────────────────────────────
 async function loadApiKeys() {
@@ -27183,7 +27249,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
                 f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
                 f'window._AMUX_HOME={_json.dumps(str(Path.home()))};'
-                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};</script></head>',
+                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};'
+                f'window._AMUX_DEFAULT_MODEL={_json.dumps(_get_default_model())};</script></head>',
                 1,
             )
             return self._html(page)
@@ -30105,6 +30172,31 @@ end tell
             db.execute("DELETE FROM layout_presets WHERE name=?", (name,))
             db.commit()
             return self._json({"ok": True})
+
+        # ── Default model (reads/writes defaults.env) ──────────────────────────
+        if path == "/api/settings/default-model":
+            defaults_file = CC_HOME / "defaults.env"
+            if method == "GET":
+                return self._json({"model": _get_default_model()})
+            if method == "PATCH":
+                body = self._read_body()
+                model = body.get("model", "").strip()
+                if not model:
+                    return self._json({"error": "model is required"}, 400)
+                # Write CC_DEFAULT_FLAGS with the new model into defaults.env
+                lines = []
+                if defaults_file.exists():
+                    lines = defaults_file.read_text().splitlines()
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("CC_DEFAULT_FLAGS="):
+                        lines[i] = f'CC_DEFAULT_FLAGS="--model {model}"'
+                        found = True
+                        break
+                if not found:
+                    lines.append(f'CC_DEFAULT_FLAGS="--model {model}"')
+                defaults_file.write_text("\n".join(lines) + "\n")
+                return self._json({"ok": True, "model": model})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
