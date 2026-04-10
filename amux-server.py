@@ -8743,12 +8743,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .metrics-table tr.row-selected td { background: rgba(88,166,255,0.08); }
   .metrics-mini-bar { display: inline-block; width: 50px; height: 4px; background: var(--border); border-radius: 2px; vertical-align: middle; margin-left: 4px; overflow: hidden; }
   .metrics-mini-bar-fill { height: 100%; border-radius: 2px; }
+  .metrics-speedtest { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 20px; }
+  .metrics-speedtest-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+  .metrics-speedtest-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-align: center; }
+  .metrics-speedtest-label { font-size: 0.65rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+  .metrics-speedtest-value { font-size: 1.7rem; font-weight: 700; color: var(--accent); margin-top: 4px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .metrics-speedtest-sub { font-size: 0.68rem; color: var(--dim); margin-top: 2px; }
+  .metrics-speedtest-bar { width: 100%; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+  .metrics-speedtest-bar-fill { height: 100%; background: linear-gradient(90deg, #58a6ff, #3fb950); width: 0%; transition: width 0.2s ease; }
+  .metrics-speedtest-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .metrics-speedtest-status { font-size: 0.78rem; color: var(--dim); }
   @media (max-width: 600px) {
     #metrics-view { height: calc(100dvh - 122px); position: relative; }
     .metrics-sidebar { position: absolute; top: 0; left: 0; bottom: 0; z-index: 10; width: 100% !important; min-width: 0 !important; border-right: none; }
     .metrics-sidebar.collapsed { width: 100% !important; opacity: 0; pointer-events: none; position: absolute; }
     .metrics-main { width: 100%; padding: 40px 12px 12px; }
     .metrics-cards { grid-template-columns: repeat(2, 1fr); }
+    .metrics-speedtest-cards { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .metrics-speedtest-value { font-size: 1.2rem; }
     .metrics-expand-btn { display: flex; }
   }
 
@@ -22730,6 +22742,114 @@ function _metricsRelTime(ts) {
   } catch(e) { return ts; }
 }
 
+// Network speed test
+let _metricsSpeedtestSize = 10 * 1024 * 1024;  // 10 MB per direction
+let _metricsSpeedtestRunning = false;
+let _metricsSpeedtestResult = null;  // { down: Mbps, up: Mbps, ping: ms }
+
+function _metricsResetSpeedtest() {
+  _metricsSpeedtestResult = null;
+  const down = document.getElementById('speedtest-down');
+  const up = document.getElementById('speedtest-up');
+  const ping = document.getElementById('speedtest-ping');
+  const bar = document.getElementById('speedtest-bar');
+  const status = document.getElementById('speedtest-status');
+  if (down) down.innerHTML = '\u2014';
+  if (up) up.innerHTML = '\u2014';
+  if (ping) ping.innerHTML = '\u2014';
+  if (bar) bar.style.width = '0%';
+  if (status) status.textContent = 'Tests transfer ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB to/from this server.';
+}
+
+function _metricsFmtSpeed(mbps) {
+  if (mbps >= 1000) return (mbps/1000).toFixed(2);
+  if (mbps >= 100) return mbps.toFixed(0);
+  if (mbps >= 10) return mbps.toFixed(1);
+  return mbps.toFixed(2);
+}
+
+function _metricsSpeedUnit(mbps) { return mbps >= 1000 ? 'Gbps' : 'Mbps'; }
+
+async function _metricsRunSpeedtest() {
+  if (_metricsSpeedtestRunning) return;
+  _metricsSpeedtestRunning = true;
+  const btn = document.getElementById('speedtest-run-btn');
+  const status = document.getElementById('speedtest-status');
+  const bar = document.getElementById('speedtest-bar');
+  const downEl = document.getElementById('speedtest-down');
+  const upEl = document.getElementById('speedtest-up');
+  const pingEl = document.getElementById('speedtest-ping');
+  const downSubEl = document.getElementById('speedtest-down-sub');
+  const upSubEl = document.getElementById('speedtest-up-sub');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running\u2026'; }
+  if (downEl) downEl.innerHTML = '\u2026';
+  if (upEl) upEl.innerHTML = '\u2014';
+  if (pingEl) pingEl.innerHTML = '\u2014';
+  if (bar) bar.style.width = '0%';
+
+  try {
+    // 1. Latency: average of 3 small no-cache pings
+    if (status) status.textContent = 'Measuring latency\u2026';
+    const pings = [];
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      await fetch(API + '/api/speedtest/download?bytes=1&_=' + Date.now() + '_' + i, { cache: 'no-store' }).then(r => r.arrayBuffer());
+      pings.push(performance.now() - t0);
+    }
+    const avgPing = pings.reduce((a,b)=>a+b,0) / pings.length;
+    if (pingEl) pingEl.textContent = avgPing.toFixed(0);
+    if (bar) bar.style.width = '15%';
+
+    // 2. Download test
+    if (status) status.textContent = 'Downloading ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB\u2026';
+    const dStart = performance.now();
+    const dResp = await fetch(API + '/api/speedtest/download?bytes=' + _metricsSpeedtestSize + '&_=' + Date.now(), { cache: 'no-store' });
+    const reader = dResp.body.getReader();
+    let downBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      downBytes += value.length;
+      const pct = 15 + (downBytes / _metricsSpeedtestSize) * 40;
+      if (bar) bar.style.width = pct.toFixed(1) + '%';
+    }
+    const dElapsed = (performance.now() - dStart) / 1000;
+    const downMbps = (downBytes * 8) / dElapsed / 1e6;
+    if (downEl) downEl.textContent = _metricsFmtSpeed(downMbps);
+    if (downSubEl) downSubEl.textContent = _metricsSpeedUnit(downMbps);
+
+    // 3. Upload test — generate random payload
+    if (status) status.textContent = 'Uploading ' + (_metricsSpeedtestSize/1048576).toFixed(0) + ' MB\u2026';
+    if (upEl) upEl.innerHTML = '\u2026';
+    const payload = new Uint8Array(_metricsSpeedtestSize);
+    // Fill with pseudo-random — incompressible enough for HTTP
+    for (let i = 0; i < payload.length; i += 4096) {
+      const end = Math.min(i + 4096, payload.length);
+      for (let j = i; j < end; j++) payload[j] = (Math.random() * 256) | 0;
+    }
+    const uStart = performance.now();
+    await fetch(API + '/api/speedtest/upload?_=' + Date.now(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: payload,
+      cache: 'no-store',
+    });
+    const uElapsed = (performance.now() - uStart) / 1000;
+    const upMbps = (_metricsSpeedtestSize * 8) / uElapsed / 1e6;
+    if (upEl) upEl.textContent = _metricsFmtSpeed(upMbps);
+    if (upSubEl) upSubEl.textContent = _metricsSpeedUnit(upMbps);
+    if (bar) bar.style.width = '100%';
+    _metricsSpeedtestResult = { down: downMbps, up: upMbps, ping: avgPing };
+    if (status) status.textContent = 'Done \u00B7 ' + downMbps.toFixed(1) + ' Mbps down, ' + upMbps.toFixed(1) + ' Mbps up, ' + avgPing.toFixed(0) + ' ms ping.';
+  } catch (e) {
+    if (status) status.textContent = 'Speed test failed: ' + (e.message || e);
+    if (bar) bar.style.width = '0%';
+  } finally {
+    _metricsSpeedtestRunning = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Run again'; }
+  }
+}
+
 function _metricsRender() {
   const data = _metricsData;
   if (!data) return;
@@ -22869,6 +22989,36 @@ function _metricsRender() {
     </div>`;
     html += '</div>';
   }
+
+  // Network speed test
+  html += `<div class="metrics-section-title">Network Speed Test</div>
+    <div class="metrics-speedtest" id="metrics-speedtest">
+      <div class="metrics-speedtest-cards">
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Download</div>
+          <div class="metrics-speedtest-value" id="speedtest-down">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-down-sub">Mbps</div>
+        </div>
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Upload</div>
+          <div class="metrics-speedtest-value" id="speedtest-up">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-up-sub">Mbps</div>
+        </div>
+        <div class="metrics-speedtest-card">
+          <div class="metrics-speedtest-label">Latency</div>
+          <div class="metrics-speedtest-value" id="speedtest-ping">&mdash;</div>
+          <div class="metrics-speedtest-sub" id="speedtest-ping-sub">ms</div>
+        </div>
+      </div>
+      <div class="metrics-speedtest-bar"><div class="metrics-speedtest-bar-fill" id="speedtest-bar"></div></div>
+      <div class="metrics-speedtest-row">
+        <div class="metrics-speedtest-status" id="speedtest-status">Tests transfer ${(_metricsSpeedtestSize/1048576).toFixed(0)} MB to/from this server.</div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" id="speedtest-run-btn" onclick="_metricsRunSpeedtest()" style="font-size:0.8rem;padding:5px 14px;">Run speed test</button>
+          <button class="btn" id="speedtest-reset-btn" onclick="_metricsResetSpeedtest()" style="font-size:0.8rem;padding:5px 12px;">Reset</button>
+        </div>
+      </div>
+    </div>`;
 
   // Session breakdown table
   html += '<div class="metrics-section-title">Session Breakdown</div>';
@@ -28132,6 +28282,48 @@ class CCHandler(BaseHTTPRequestHandler):
         # GET /api/metrics — system + per-session resource metrics
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
+
+        # GET /api/speedtest/download?bytes=N — stream N bytes for download speed test
+        if method == "GET" and path == "/api/speedtest/download":
+            try:
+                size = int(qs.get("bytes", ["10485760"])[0])  # default 10 MB
+            except (ValueError, TypeError):
+                size = 10 * 1024 * 1024
+            size = max(1, min(size, 100 * 1024 * 1024))  # cap at 100 MB
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.end_headers()
+            chunk = os.urandom(65536)  # 64 KB random chunk, reused (incompressible)
+            remaining = size
+            try:
+                while remaining > 0:
+                    n = min(len(chunk), remaining)
+                    self.wfile.write(chunk[:n])
+                    remaining -= n
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        # POST /api/speedtest/upload — accept arbitrary bytes, return count for upload speed test
+        if method == "POST" and path == "/api/speedtest/upload":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (ValueError, TypeError):
+                length = 0
+            length = max(0, min(length, 100 * 1024 * 1024))  # cap at 100 MB
+            received = 0
+            try:
+                while received < length:
+                    chunk = self.rfile.read(min(65536, length - received))
+                    if not chunk:
+                        break
+                    received += len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return self._json({"ok": True, "bytes": received})
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
