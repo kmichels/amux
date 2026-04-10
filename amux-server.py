@@ -7105,10 +7105,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Tasks panel */
   .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
-  #peek-notes-quill-wrap .ql-toolbar { flex-shrink: 0; border-color: var(--border); }
-  #peek-notes-quill-wrap .ql-container { flex: 1; min-height: 0; overflow-y: auto; border-color: var(--border); }
-  #peek-notes-quill-wrap .ql-editor { min-height: 100%; }
-  #peek-notes-editor-view { flex: 1; min-height: 0; }
+  #peek-notes-panel.active { display: flex; padding: 0; gap: 0; }
+  #peek-notes-panel .notes-sidebar { min-width: 160px; width: 220px; }
+  #peek-notes-panel.sidebar-collapsed .notes-expand-btn { display: flex; }
+  @media (max-width: 600px) {
+    #peek-notes-panel .notes-sidebar {
+      position: absolute; top: 0; left: 0; bottom: 0; z-index: 10;
+      width: 100% !important; min-width: 0 !important; border-right: none;
+      transition: transform 0.2s ease, opacity 0.2s ease;
+    }
+    #peek-notes-panel .notes-sidebar.collapsed {
+      width: 100% !important; transform: translateX(-110%); opacity: 0; pointer-events: none;
+    }
+    #peek-notes-panel .notes-editor-pane { width: 100%; }
+    #peek-notes-panel .notes-expand-btn { display: flex !important; }
+  }
   .peek-tasks-add { display: flex; gap: 8px; flex-shrink: 0; }
   .peek-tasks-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
   .peek-issue-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
@@ -10142,32 +10153,45 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="peek-tasks-list" id="peek-schedules-list"></div>
   </div>
   <!-- Notes panel -->
-  <div id="peek-notes-panel" class="peek-tasks-panel" style="flex-direction:column;">
-    <!-- List view -->
-    <div id="peek-notes-list-view">
-      <div class="peek-tasks-add" style="gap:10px;">
-        <span id="peek-notes-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
-        <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="_peekNotesNew()">+ New note</button>
+  <div id="peek-notes-panel" class="peek-tasks-panel" style="flex-direction:row;padding:0;gap:0;overflow:hidden;">
+    <!-- Sidebar -->
+    <div class="notes-sidebar" id="peek-notes-sidebar">
+      <div class="notes-sidebar-header">
+        <span style="font-weight:600;font-size:0.85rem;">Notes</span>
+        <div class="notes-sidebar-actions">
+          <button class="notes-new-btn" onclick="_peekNotesNew()" title="New note"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="notes-toggle-btn" onclick="_peekNotesToggleSidebar()" title="Collapse sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg></button>
+        </div>
       </div>
-      <div class="peek-tasks-list" id="peek-notes-list"></div>
+      <div class="notes-search-wrap">
+        <input id="peek-notes-search" type="search" placeholder="Search notes…" oninput="_peekNotesSearchFilter(this.value)" style="width:100%;box-sizing:border-box;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.8rem;outline:none;">
+      </div>
+      <div id="peek-notes-list" class="notes-list"></div>
     </div>
-    <!-- Editor view (hidden until a note is opened) -->
-    <div id="peek-notes-editor-view" style="display:none;flex:1;flex-direction:column;min-height:0;">
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;flex-shrink:0;">
-        <button class="btn" style="font-size:0.75rem;padding:3px 10px;" onclick="_peekNotesBack()">&#x2190; Back</button>
-        <input id="peek-notes-title" type="text" placeholder="Note title…" style="flex:1;border:none;background:transparent;color:var(--text);font-size:0.9rem;font-weight:600;outline:none;min-width:0;"
-          oninput="_peekNotesTitleChange()" onblur="_peekNotesSaveDebounce()">
-        <span id="peek-notes-save-status" style="font-size:0.72rem;color:var(--dim);flex-shrink:0;"></span>
-        <button class="btn" style="font-size:0.75rem;padding:3px 10px;color:var(--red);" onclick="_peekNotesDelete()">Delete</button>
+    <!-- Editor pane -->
+    <div class="notes-editor-pane" id="peek-notes-editor-pane">
+      <div class="notes-editor-header">
+        <button class="notes-expand-btn" onclick="_peekNotesToggleSidebar()" title="Show notes list"><svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg></button>
+        <input id="peek-notes-title" type="text" placeholder="Note title…" class="notes-title-input" oninput="_peekNotesTitleChange()" onblur="_peekNotesSaveDebounce()">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span id="peek-notes-save-status" style="font-size:0.72rem;color:var(--dim);"></span>
+          <button id="peek-notes-pin-btn" class="notes-pin-btn" onclick="_peekNotesTogglePin()" title="Pin to top"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/></svg></button>
+          <button class="notes-delete-btn" onclick="_peekNotesDelete()" title="Delete note"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+        </div>
       </div>
-      <div style="display:flex;gap:0;flex-shrink:0;border-bottom:1px solid var(--border);">
-        <button class="notes-mode-tab active" id="peek-notes-tab-edit" onclick="_peekNotesSwitchMode('edit')" style="font-size:0.78rem;padding:4px 12px;">Edit</button>
-        <button class="notes-mode-tab" id="peek-notes-tab-preview" onclick="_peekNotesSwitchMode('preview')" style="font-size:0.78rem;padding:4px 12px;">Preview</button>
+      <div class="notes-mode-tabs" id="peek-notes-mode-tabs" style="display:none;">
+        <button class="notes-mode-tab" id="peek-notes-tab-edit" onclick="_peekNotesSwitchMode('edit')">Edit</button>
+        <button class="notes-mode-tab active" id="peek-notes-tab-preview" onclick="_peekNotesSwitchMode('preview')">Preview</button>
       </div>
-      <div id="peek-notes-quill-wrap" class="notes-quill-wrap" style="flex:1;min-height:0;overflow-y:auto;display:flex;">
+      <div class="notes-quill-wrap" id="peek-notes-quill-wrap" style="display:none;">
         <div id="peek-notes-quill"></div>
       </div>
-      <div id="peek-notes-preview" class="notes-preview" style="flex:1;min-height:0;overflow-y:auto;display:none;"></div>
+      <div class="notes-preview" id="peek-notes-preview"></div>
+      <div class="notes-empty-state" id="peek-notes-empty-state">
+        <div style="font-size:2rem;margin-bottom:8px;">📝</div>
+        <div style="color:var(--dim);font-size:0.85rem;">Select a note or create a new one</div>
+        <button class="btn" onclick="_peekNotesNew()" style="margin-top:12px;font-size:0.8rem;">+ New Note</button>
+      </div>
     </div>
   </div>
 </div>
@@ -13283,37 +13307,82 @@ let _peekNotesActive = null;
 let _peekQuill = null;
 let _peekNotesSaveTimer = null;
 let _peekNotesLoading = false;
-let _peekNotesMode = 'edit';
+let _peekNotesMode = 'preview';
+let _peekNotesSidebarOpen = true;
+let _peekNotesRawContent = '';
 
 function _peekNotesFolder() {
   return '_sessions/' + peekSession;
 }
 
+function _peekNotesToggleSidebar() {
+  _peekNotesSidebarOpen = !_peekNotesSidebarOpen;
+  _peekNotesApplySidebarState();
+}
+
+function _peekNotesApplySidebarState() {
+  const panel = document.getElementById('peek-notes-panel');
+  const sidebar = document.getElementById('peek-notes-sidebar');
+  if (!panel || !sidebar) return;
+  if (_peekNotesSidebarOpen) {
+    sidebar.classList.remove('collapsed');
+    panel.classList.remove('sidebar-collapsed');
+  } else {
+    sidebar.classList.add('collapsed');
+    panel.classList.add('sidebar-collapsed');
+  }
+}
+
 async function _peekNotesLoad() {
   const list = document.getElementById('peek-notes-list');
-  const count = document.getElementById('peek-notes-count');
   if (!peekSession) return;
-  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Loading…</div>';
+  list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 8px;">Loading…</div>';
   try {
     const r = await fetch(API + '/api/notes');
     const all = await r.json();
     const folder = _peekNotesFolder() + '/';
     _peekNotesAll = all.filter(n => n.path.startsWith(folder));
-    count.textContent = _peekNotesAll.length ? _peekNotesAll.length + ' note' + (_peekNotesAll.length === 1 ? '' : 's') : '';
-    if (!_peekNotesAll.length) {
-      list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No notes for this session yet.</div>';
-      return;
+    _peekNotesRenderList(_peekNotesAll);
+    // Auto-open first note if none active
+    if (!_peekNotesActive && _peekNotesAll.length) {
+      _peekNotesOpen(_peekNotesAll[0].path);
     }
-    list.innerHTML = _peekNotesAll.map(n => {
-      const updated = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
-      return '<div class="peek-issue-item" onclick="_peekNotesOpen(\'' + esc(n.path).replace(/'/g, "\\'") + '\')">' +
-        '<span class="peek-issue-title" style="flex:1;">' + esc(n.name || n.path) + '</span>' +
-        '<span style="font-size:0.72rem;color:var(--dim);">' + updated + '</span>' +
-      '</div>';
-    }).join('');
+    if (!_peekNotesAll.length) _peekNotesShowEmpty();
   } catch(e) {
-    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">Failed to load notes.</div>';
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 8px;">Failed to load notes.</div>';
   }
+}
+
+function _peekNotesRenderList(notes) {
+  const el = document.getElementById('peek-notes-list');
+  if (!notes.length) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:0.82rem;padding:12px 8px;">No notes yet</div>';
+    return;
+  }
+  el.innerHTML = notes.map(n => {
+    const active = _peekNotesActive && _peekNotesActive.path === n.path ? ' active' : '';
+    const pinned = n.pinned ? ' pinned' : '';
+    const dt = n.updated ? new Date(n.updated * 1000).toLocaleDateString() : '';
+    const stem = n.path.replace(/\.md$/, '').split('/').pop();
+    const rawName = n.name || stem;
+    const displayName = /^untitled(-\d+)?$/.test(rawName) ? 'Untitled' : rawName;
+    return `<div class="notes-list-item${active}${pinned}" data-path="${esc(n.path)}"
+      onclick="_peekNotesOpen(this.dataset.path)" style="display:flex;align-items:center;gap:4px;">
+      <div style="flex:1;min-width:0;">
+        <div class="nli-title">${esc(displayName)}</div>
+        <div class="nli-date">${dt}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _peekNotesShowEmpty() {
+  document.getElementById('peek-notes-empty-state').style.display = '';
+  document.getElementById('peek-notes-mode-tabs').style.display = 'none';
+  document.getElementById('peek-notes-quill-wrap').style.display = 'none';
+  document.getElementById('peek-notes-preview').classList.remove('active');
+  document.getElementById('peek-notes-preview').style.display = 'none';
+  document.getElementById('peek-notes-title').value = '';
 }
 
 function _peekNotesInitQuill() {
@@ -13344,47 +13413,62 @@ function _peekNotesInitQuill() {
     if (first && first.tagName === 'H1') {
       const h1 = first.textContent.trim();
       const ti = document.getElementById('peek-notes-title');
-      if (ti && ti.value !== h1) ti.value = h1;
+      if (ti && ti.value !== h1) {
+        ti.value = h1;
+        if (_peekNotesActive) {
+          _peekNotesActive.title = h1;
+          const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
+          if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = h1 || _peekNotesActive.path.replace(/\.md$/, ''); }
+          const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+          if (entry) entry.name = h1 || entry.path.replace(/\.md$/, '');
+        }
+      }
     }
     _peekNotesSaveDebounce();
   });
 }
 
 async function _peekNotesOpen(path) {
+  if (path === _peekNotesActive?.path) return;
   if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
   _peekNotesInitQuill();
-  document.getElementById('peek-notes-list-view').style.display = 'none';
-  const edView = document.getElementById('peek-notes-editor-view');
-  edView.style.display = 'flex';
+  // Highlight in sidebar
+  document.querySelectorAll('#peek-notes-list .notes-list-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.path === path);
+  });
   document.getElementById('peek-notes-save-status').textContent = '';
   const urlPath = path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/');
   try {
     const r = await fetch(API + '/api/notes/' + urlPath);
+    if (!r.ok) throw new Error('not ok');
     const data = await r.json();
     _peekNotesActive = { path: data.path };
-    const h1html = (data.content || '').match(/<h1[^>]*>(.*?)<\/h1>/i);
-    const h1md = (data.content || '').match(/^#\s+(.+)$/m);
-    const title = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : path.replace(/\.md$/, '').split('/').pop());
-    _peekNotesActive.title = title;
-    document.getElementById('peek-notes-title').value = title;
+    _peekNotesRawContent = data.content || '';
+    const h1html = _peekNotesRawContent.match(/<h1[^>]*>(.*?)<\/h1>/i);
+    const h1md = _peekNotesRawContent.match(/^#\s+(.+)$/m);
+    const titleFromContent = h1html ? h1html[1].replace(/<[^>]+>/g, '') : (h1md ? h1md[1] : '');
+    const titleFromPath = path.replace(/\.md$/, '').split('/').pop();
+    _peekNotesActive.title = titleFromContent || titleFromPath;
+    document.getElementById('peek-notes-title').value = _peekNotesActive.title;
+    const listEntry = _peekNotesAll.find(n => n.path === data.path);
+    if (listEntry) listEntry.name = _peekNotesActive.title;
     _peekNotesLoading = true;
-    const isHtml = /<[a-z][\s\S]*>/i.test(data.content);
-    if (isHtml) _peekQuill.root.innerHTML = data.content || '';
-    else _peekQuill.setText(data.content || '');
+    const isHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
+    if (isHtml) _peekQuill.root.innerHTML = _peekNotesRawContent;
+    else _peekQuill.setText(_peekNotesRawContent || '');
     setTimeout(() => { _peekNotesLoading = false; }, 0);
-    _peekNotesSwitchMode('edit');
+    document.getElementById('peek-notes-empty-state').style.display = 'none';
+    document.getElementById('peek-notes-mode-tabs').style.display = 'flex';
+    _peekNotesSwitchMode('preview');
+    _peekNotesUpdatePinBtn();
+    // On mobile, collapse sidebar after selecting
+    if (window.innerWidth <= 600 && _peekNotesSidebarOpen) {
+      _peekNotesSidebarOpen = false;
+      _peekNotesApplySidebarState();
+    }
   } catch(e) {
     showToast('Failed to load note');
-    _peekNotesBack();
   }
-}
-
-function _peekNotesBack() {
-  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
-  _peekNotesActive = null;
-  document.getElementById('peek-notes-editor-view').style.display = 'none';
-  document.getElementById('peek-notes-list-view').style.display = '';
-  _peekNotesLoad();
 }
 
 async function _peekNotesNew() {
@@ -13404,6 +13488,9 @@ async function _peekNotesNew() {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ content: '<h1>' + displayName + '</h1>' })
   });
+  _peekNotesAll.unshift({ path: filename, name: displayName, updated: Math.floor(Date.now() / 1000), pinned: false, size: 0 });
+  _peekNotesRenderList(_peekNotesAll);
+  _peekNotesActive = null; // force open
   await _peekNotesOpen(filename);
   const ti = document.getElementById('peek-notes-title');
   if (ti) { ti.focus(); ti.select(); }
@@ -13417,6 +13504,7 @@ function _peekNotesSaveDebounce() {
 async function _peekNotesSave() {
   if (!_peekNotesActive || !_peekQuill) return;
   const content = _peekQuill.root.innerHTML === '<p><br></p>' ? '' : _peekQuill.root.innerHTML;
+  _peekNotesRawContent = content;
   const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('peek-notes-save-status');
   const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
@@ -13441,18 +13529,35 @@ function _peekNotesTitleChange() {
     _peekQuill.insertText(0, (newTitle || '') + '\n', 'api');
     _peekQuill.formatLine(0, 1, 'header', 1, 'api');
   }
+  // Update sidebar immediately
+  const activeEl = document.querySelector('#peek-notes-list .notes-list-item.active');
+  if (activeEl) { const s = activeEl.querySelector('.nli-title'); if (s) s.textContent = newTitle || _peekNotesActive.path.replace(/\.md$/, ''); }
+  const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+  if (entry) entry.name = newTitle || entry.path.replace(/\.md$/, '');
   _peekNotesSaveDebounce();
 }
 
 async function _peekNotesDelete() {
   if (!_peekNotesActive) return;
-  if (!confirm('Delete "' + (_peekNotesActive.title || 'this note') + '"?')) return;
+  const btn = document.querySelector('#peek-notes-panel .notes-delete-btn');
+  if (btn && !btn.classList.contains('confirming')) {
+    btn.classList.add('confirming');
+    btn.textContent = 'Delete?';
+    setTimeout(() => { btn.classList.remove('confirming'); btn.innerHTML = _TRASH_SVG; }, 3000);
+    return;
+  }
+  if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _TRASH_SVG; }
   const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
-  await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+  _peekNotesAll = _peekNotesAll.filter(n => n.path !== _peekNotesActive.path);
+  document.querySelector('#peek-notes-list .notes-list-item[data-path="' + _peekNotesActive.path + '"]')?.remove();
   _peekNotesActive = null;
-  document.getElementById('peek-notes-editor-view').style.display = 'none';
-  document.getElementById('peek-notes-list-view').style.display = '';
-  _peekNotesLoad();
+  await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+  if (_peekNotesAll.length > 0) {
+    _peekNotesOpen(_peekNotesAll[0].path);
+  } else {
+    _peekNotesShowEmpty();
+    _peekNotesRenderList([]);
+  }
 }
 
 function _peekNotesSwitchMode(mode) {
@@ -13463,15 +13568,61 @@ function _peekNotesSwitchMode(mode) {
   const preview = document.getElementById('peek-notes-preview');
   if (mode === 'preview') {
     if (_peekQuill) {
-      preview.innerHTML = _peekQuill.root.innerHTML;
+      const rawIsHtml = /<[a-z][\s\S]*>/i.test(_peekNotesRawContent);
+      if (rawIsHtml) {
+        preview.innerHTML = _peekQuill.root.innerHTML;
+      } else {
+        preview.innerHTML = renderMarkdown(_peekNotesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
+      }
       preview.classList.add('md-content');
     }
-    preview.style.display = '';
+    preview.classList.add('active');
     quillWrap.style.display = 'none';
   } else {
+    preview.classList.remove('active');
     preview.style.display = 'none';
     quillWrap.style.display = 'flex';
   }
+}
+
+async function _peekNotesTogglePin() {
+  if (!_peekNotesActive) return;
+  const pathKey = _peekNotesActive.path.replace(/\.md$/, '');
+  const r = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/') + '/pin', { method: 'POST' });
+  if (r) {
+    const entry = _peekNotesAll.find(n => n.path === _peekNotesActive.path);
+    if (entry) entry.pinned = r.pinned;
+    _peekNotesUpdatePinBtn();
+    _peekNotesAll.sort((a, b) => (a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1) || (b.updated - a.updated));
+    _peekNotesRenderList(_peekNotesAll);
+  }
+}
+
+function _peekNotesUpdatePinBtn() {
+  const btn = document.getElementById('peek-notes-pin-btn');
+  if (!btn) return;
+  const entry = _peekNotesAll.find(n => n.path === _peekNotesActive?.path);
+  btn.classList.toggle('pinned', !!entry?.pinned);
+  btn.style.color = entry?.pinned ? 'var(--accent)' : '';
+}
+
+function _peekNotesSearchFilter(q) {
+  if (!q.trim()) { _peekNotesRenderList(_peekNotesAll); return; }
+  const lq = q.toLowerCase();
+  _peekNotesRenderList(_peekNotesAll.filter(n =>
+    (n.name || '').toLowerCase().includes(lq) || n.path.toLowerCase().includes(lq)
+  ));
+}
+
+function _peekNotesReset() {
+  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
+  _peekNotesActive = null;
+  _peekNotesAll = [];
+  _peekNotesSidebarOpen = true;
+  _peekNotesApplySidebarState();
+  _peekNotesShowEmpty();
+  const list = document.getElementById('peek-notes-list');
+  if (list) list.innerHTML = '';
 }
 
 function peekMemoryTab(tab) {
@@ -13669,14 +13820,8 @@ function copyPeekContent() {
 }
 
 function closePeek() {
-  // Flush pending peek notes save
-  if (_peekNotesSaveTimer) { clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave(); }
-  _peekNotesActive = null;
-  // Reset notes panel to list view for next open
-  const nev = document.getElementById('peek-notes-editor-view');
-  const nlv = document.getElementById('peek-notes-list-view');
-  if (nev) nev.style.display = 'none';
-  if (nlv) nlv.style.display = '';
+  // Reset peek notes
+  _peekNotesReset();
   // Save command draft for this session
   if (peekSession) {
     const inp = document.getElementById('peek-cmd-input');
