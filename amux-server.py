@@ -3576,6 +3576,9 @@ _server_start_time = time.time()
 _server_request_count = 0
 _server_request_lock = threading.Lock()
 
+# Cached API key validation result — updated by background validator
+_api_key_status: dict = {"valid": None, "error": "", "checked_at": 0}
+
 
 def _build_system_metrics() -> dict:
     """Build system resource metrics and per-session process attribution."""
@@ -10579,6 +10582,9 @@ async function _initIdentity() {
         const banner = document.getElementById('no-apikey-banner');
         if (banner) banner.style.display = '';
       }
+    } else if (d.key_valid === false && d.key_error) {
+      // Key exists but is invalid — show warning banner
+      _showKeyWarning(d.key_error);
     }
     _applyIdentityToSettings();
     if (_cloudEmail) {
@@ -10587,6 +10593,22 @@ async function _initIdentity() {
       _loadGatewayOrgs();
     }
   } catch(e) {}
+}
+
+function _showKeyWarning(error) {
+  const msgs = {
+    invalid_api_key: 'Your API key is invalid or revoked.',
+    api_key_forbidden: 'Your API key does not have permission.',
+    no_api_key: 'No API key configured.',
+  };
+  const msg = msgs[error] || 'API key issue: ' + error;
+  showToast(msg + ' Open Settings to update.', 8000);
+  // Also open the API key modal if it exists
+  const m = document.getElementById('apikey-setup-modal');
+  if (m) {
+    m.style.display = 'flex';
+    setTimeout(() => document.getElementById('apikey-setup-input')?.focus(), 100);
+  }
 }
 
 async function apikeySetupLogin() {
@@ -29904,9 +29926,12 @@ end tell
                     has_oauth = bool(json.loads(_cj.read_text()).get("oauthAccount"))
             except Exception:
                 pass
+            # Include cached key validation result
+            key_valid, key_error = _api_key_status.get("valid", None), _api_key_status.get("error", "")
             return self._json({"email": email, "is_cloud": bool(email),
                                "has_api_key": has_key_in_env or has_oauth,
-                               "has_oauth": has_oauth})
+                               "has_oauth": has_oauth,
+                               "key_valid": key_valid, "key_error": key_error})
 
         # ── Layout presets ────────────────────────────────────────────────────
         if path == "/api/layout-presets":
@@ -31720,6 +31745,113 @@ def _sync_skills_from_github(_ur, repo, branch):
 # SERVER STARTUP & FILE WATCHER
 # ═══════════════════════════════════════════
 
+_server_env_mtime: float = _server_env_file.stat().st_mtime if _server_env_file.exists() else 0
+
+
+def _watch_server_env():
+    """Periodically reload ~/.amux/server.env so key changes take effect without restart.
+
+    Checks every 15 seconds. When server.env has been modified, re-reads it and
+    updates os.environ for any changed values. Also pushes ANTHROPIC_API_KEY
+    into running tmux sessions and re-configures ~/.claude.json.
+    """
+    global _server_env_mtime
+    while True:
+        time.sleep(15)
+        try:
+            if not _server_env_file.exists():
+                continue
+            mt = _server_env_file.stat().st_mtime
+            if mt == _server_env_mtime:
+                continue
+            _server_env_mtime = mt
+            new_vals = {}
+            for line in _server_env_file.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    k, v = k.strip(), v.strip()
+                    if v and os.environ.get(k) != v:
+                        os.environ[k] = v
+                        new_vals[k] = v
+            if not new_vals:
+                continue
+            slog(f"[env-reload] server.env changed, updated: {', '.join(new_vals.keys())}")
+            if "ANTHROPIC_API_KEY" in new_vals:
+                _init_claude_config()
+                # Push key into all running tmux sessions
+                _new_key = new_vals["ANTHROPIC_API_KEY"]
+                try:
+                    r = subprocess.run(
+                        ["tmux", "list-sessions", "-F", "#{session_name}"],
+                        capture_output=True, text=True)
+                    if r.returncode == 0:
+                        for sn in r.stdout.strip().splitlines():
+                            subprocess.run(
+                                ["tmux", "set-environment", "-t", sn,
+                                 "ANTHROPIC_API_KEY", _new_key],
+                                capture_output=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            slog(f"[env-reload] error: {e}")
+
+
+def _validate_api_key() -> tuple[bool, str]:
+    """Check if the current ANTHROPIC_API_KEY is valid with a minimal API call.
+
+    Returns (is_valid, error_message). Skips validation if OAuth is configured.
+    """
+    # Skip if OAuth is present — key isn't needed
+    try:
+        import json as _j
+        cj = Path.home() / ".claude.json"
+        if cj.exists() and _j.loads(cj.read_text()).get("oauthAccount"):
+            return True, ""
+    except Exception:
+        pass
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return False, "no_api_key"
+    # Quick validation: count tokens endpoint is cheap
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages/count_tokens",
+            data=json.dumps({
+                "model": "claude-haiku-4-5-20251001",
+                "messages": [{"role": "user", "content": "x"}],
+            }).encode(),
+            headers={
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        return True, ""
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "invalid_api_key"
+        if e.code == 403:
+            return False, "api_key_forbidden"
+        # Other errors (rate limit, server error) — don't block on transient issues
+        return True, ""
+    except Exception:
+        # Network error — don't block, assume key is fine
+        return True, ""
+
+
+def _validate_api_key_job():
+    """Background job: validate the API key every 5 min and cache the result."""
+    valid, error = _validate_api_key()
+    _api_key_status["valid"] = valid
+    _api_key_status["error"] = error
+    _api_key_status["checked_at"] = int(time.time())
+    if not valid and error:
+        slog(f"[key-validate] API key check failed: {error}")
+
+
 def _watch_self(server):
     """Watch amux-server.py for changes and restart on modification.
 
@@ -32053,6 +32185,7 @@ def main():
     schedule_job(_cleanup_logs,             interval=86400,              name="log_rotation",       initial_delay=120)
     schedule_job(_cleanup_recordings,       interval=86400,              name="recording_cleanup",  initial_delay=180)
     schedule_job(_db_maintenance,           interval=86400,              name="db_maintenance",     initial_delay=240)
+    schedule_job(_validate_api_key_job,     interval=300,                name="key_validate",       initial_delay=10)
     if _AUTO_UPDATE_REPO:
         slog(f"[auto-update] watching {_AUTO_UPDATE_REPO}@{_AUTO_UPDATE_BRANCH} every {_AUTO_UPDATE_INTERVAL}s")
         schedule_job(_auto_update_check, interval=_AUTO_UPDATE_INTERVAL, name="auto_update", initial_delay=_AUTO_UPDATE_INTERVAL)
@@ -32060,6 +32193,8 @@ def main():
     # Start file watcher thread
     watcher = threading.Thread(target=_watch_self, args=(server,), daemon=True)
     watcher.start()
+    # Watch server.env for key changes (catches gateway pushes, manual edits)
+    threading.Thread(target=_watch_server_env, daemon=True).start()
 
     # Initial snapshot immediately, then unified scheduler takes over
     threading.Thread(target=_snapshot_all_sessions, daemon=True).start()
