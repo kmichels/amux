@@ -4123,7 +4123,7 @@ def list_sessions() -> list:
             "task_time": task_time,
             "task_name": _doing_tasks.get(name) or meta.get("task_summary", "") or cfg.get("CC_DESC", "") or "",
             "tokens": tokens,
-            "branch": cfg.get("CC_BRANCH", ""),
+            "branch": "" if cfg.get("CC_BRANCH", "") == "none" else cfg.get("CC_BRANCH", ""),
             "mcp": cfg.get("CC_MCP", ""),
             "worktree": cfg.get("CC_WORKTREE", "") == "1",
             "worktree_repo": cfg.get("CC_WORKTREE_REPO", ""),
@@ -11881,6 +11881,8 @@ function _isBranchMain(b) { return !b || b === 'main' || b === 'master' || b ===
 
 function _renderBranchBadge(name, sessionBranch) {
   const gi = gitInfo[name];
+  // Treat the legacy 'none' sentinel as no preference and fall through to git-detected branch
+  if (sessionBranch === 'none') sessionBranch = '';
   // Show session branch from config, or fall back to git-detected branch
   const displayBranch = sessionBranch || (gi && gi.branch) || '';
   if (!displayBranch) return '';
@@ -11910,8 +11912,11 @@ async function _fetchGitBranches(sess) {
   for (const [n, gi] of Object.entries(newInfo)) {
     if (!gi.repo) continue;
     const sess = (sessions || []).find(s => s.name === n);
-    const effectiveBranch = (sess && sess.branch) || gi.branch;
+    const sb = sess && sess.branch;
+    const effectiveBranch = (sb && sb !== 'none' ? sb : null) || gi.branch;
     if (!effectiveBranch) continue;
+    // Sharing main/master/dev isn't a conflict — that's the default state
+    if (_isBranchMain(effectiveBranch)) continue;
     const key = gi.repo + '::' + effectiveBranch;
     (byKey[key] = byKey[key] || []).push(n);
   }
@@ -11929,7 +11934,8 @@ function showBranchPopover(name, e) {
   document.querySelectorAll('.branch-popover').forEach(p => p.remove());
   const gi = gitInfo[name] || {};
   const sess = sessions.find(s => s.name === name);
-  const sessionBranch = sess && sess.branch;
+  let sessionBranch = sess && sess.branch;
+  if (sessionBranch === 'none') sessionBranch = '';
   const displayBranch = sessionBranch || gi.branch || '';
   const hasBranch = sessionBranch || !_isBranchMain(gi.branch);
   const pop = document.createElement('div');
@@ -13039,7 +13045,7 @@ async function loadPeekGit() {
     }
     // Merge session branch from sessions list if not in git response
     const sess = sessions.find(s => s.name === peekSession);
-    if (sess && sess.branch && !d.session_branch) d.session_branch = sess.branch;
+    if (sess && sess.branch && sess.branch !== 'none' && !d.session_branch) d.session_branch = sess.branch;
     _peekGitData = d;
     _renderPeekGit(d);
   } catch(e) {
@@ -31367,7 +31373,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 cfg_g = parse_env_file(env_file)
                 info = _git_info(wd, detail=detail)
                 if detail:
-                    info["session_branch"] = cfg_g.get("CC_BRANCH", "")
+                    sb = cfg_g.get("CC_BRANCH", "")
+                    info["session_branch"] = "" if sb == "none" else sb
                 return self._json(info)
             if action == "memory":
                 mem_file = _session_mem_file(name)
