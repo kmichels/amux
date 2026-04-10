@@ -100,6 +100,11 @@ async function runElectronTests() {
       const notesCrud = await testNotesCRUD();
       log(notesCrud, 'Notes CRUD (create → read → delete)');
 
+      // Test: Connect page HTML exists
+      const connectHtml = require('fs').readFileSync(require('path').join(__dirname, 'connect.html'), 'utf8');
+      log(connectHtml.includes('id="url-input"'), 'Connect page has URL input');
+      log(connectHtml.includes('id="conn-list"'), 'Connect page has connection list');
+
       // Test: Dashboard HTML contains expected elements
       const dashHtml = await fetchText('/');
       const hasApp = dashHtml.includes('id="brand-header"') || dashHtml.includes('id="sessions-view"') || dashHtml.includes('id="conn-status"');

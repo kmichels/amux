@@ -6,6 +6,11 @@ __pycache__/
 node_modules/
 package-lock.json
 scratch/
+
+# Legacy desktop builds (replaced by electron/)
+Amux.app/
+amux-desktop.swift
+
 # Generated during cloud deploy — always copied from root amux-server.py
 cloud/docker/amux-server.py
 
