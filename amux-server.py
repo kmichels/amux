@@ -27046,6 +27046,10 @@ class CCHandler(BaseHTTPRequestHandler):
             )
             return self._html(page)
 
+        # GET /health — lightweight uptime check (no auth required)
+        if method == "GET" and path == "/health":
+            return self._json({"status": "ok"})
+
         # GET /release-notes — standalone SEO-indexable release notes page
         if method == "GET" and path == "/release-notes":
             return self._html(RELEASE_NOTES_HTML)
