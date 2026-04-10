@@ -276,9 +276,16 @@ def _aria2_list_all():
 
 # ── Browser automation helpers (browser-use CLI) ─────────────────────────────
 _BROWSER_USE_BIN = shutil.which("browser-use") or "/usr/local/bin/browser-use"
+_browser_session_activity: dict[str, float] = {}  # session_name -> last_activity epoch
+
+def _browser_touch(session: str = "amux"):
+    """Record activity for a browser-use session (called on every _bu_call)."""
+    _browser_session_activity[session] = time.time()
 
 def _bu_call(args: list, timeout_s: int = 30, session: str = "amux") -> dict:
     """Run a browser-use CLI command, return parsed JSON result."""
+    if args and args[0] != "close":
+        _browser_touch(session)
     cmd = [_BROWSER_USE_BIN, "--json", "--session", session] + args
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
@@ -1457,17 +1464,49 @@ def _snapshot_loop():
         pass
 
 
-# ── Browser process reaper ────────────────────────────────────────────────────
-_BROWSER_TTL_SECONDS = 2 * 3600  # 2 hours — kill browser-use Chrome processes older than this
-_last_browser_reap = 0.0
+# ── Browser idle reaper ──────────────────────────────────────────────────────
+_BROWSER_IDLE_SECONDS = 15 * 60   # kill browser-use sessions idle >15 min
+_BROWSER_MAX_TTL_SECONDS = 2 * 3600  # hard cap: kill any browser process >2h regardless
+
+def _parse_etime(etime: str) -> int | None:
+    """Parse ps etime format [[DD-]HH:]MM:SS into seconds."""
+    if not etime:
+        return None
+    parts = etime.replace("-", ":").split(":")
+    try:
+        parts = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(parts) == 2: return parts[0]*60 + parts[1]
+    elif len(parts) == 3: return parts[0]*3600 + parts[1]*60 + parts[2]
+    elif len(parts) == 4: return parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
+    return None
 
 def _reap_stale_browsers():
-    """Kill headless Chrome processes (spawned by browser-use) that exceed the TTL."""
-    global _last_browser_reap
+    """Kill browser-use Chrome/Playwright processes that are idle or exceed max TTL.
+
+    Two checks:
+    1. Idle check — if no API call has touched a session in _BROWSER_IDLE_SECONDS, close it.
+    2. Hard TTL — any browser-use Chrome process older than _BROWSER_MAX_TTL_SECONDS is killed
+       regardless of activity (safety net for leaked processes).
+    """
     now = time.time()
-    if now - _last_browser_reap < 600:  # run at most every 10 minutes
-        return
-    _last_browser_reap = now
+
+    # ── Phase 1: close idle browser-use sessions via CLI ──
+    idle_sessions = []
+    for session, last_active in list(_browser_session_activity.items()):
+        if now - last_active > _BROWSER_IDLE_SECONDS:
+            idle_sessions.append(session)
+    for session in idle_sessions:
+        try:
+            _bu_call(["close"], session=session, timeout_s=10)
+            slog(f"[browser-reaper] closed idle session '{session}' "
+                 f"(idle {int(now - _browser_session_activity.get(session, now))}s)")
+        except Exception:
+            pass
+        _browser_session_activity.pop(session, None)
+
+    # ── Phase 2: hard-kill orphan Chrome/Playwright processes past max TTL ──
     try:
         r = subprocess.run(["pgrep", "-f", "browser-use-user-data-dir"],
                            capture_output=True, text=True, timeout=5)
@@ -1479,23 +1518,17 @@ def _reap_stale_browsers():
             try:
                 r2 = subprocess.run(["ps", "-o", "etime=", "-p", pid],
                                     capture_output=True, text=True, timeout=5)
-                etime = r2.stdout.strip()
-                if not etime:
+                secs = _parse_etime(r2.stdout.strip())
+                if secs is None:
                     continue
-                # Parse etime: [[DD-]HH:]MM:SS
-                parts = etime.replace("-", ":").split(":")
-                parts = [int(p) for p in parts]
-                if len(parts) == 2: secs = parts[0]*60 + parts[1]
-                elif len(parts) == 3: secs = parts[0]*3600 + parts[1]*60 + parts[2]
-                elif len(parts) == 4: secs = parts[0]*86400 + parts[1]*3600 + parts[2]*60 + parts[3]
-                else: continue
-                if secs > _BROWSER_TTL_SECONDS:
+                if secs > _BROWSER_MAX_TTL_SECONDS:
                     os.kill(int(pid), 9)
                     reaped += 1
             except (ProcessLookupError, ValueError, subprocess.TimeoutExpired):
                 pass
         if reaped:
-            slog(f"[browser-reaper] killed {reaped} stale Chrome processes (>{_BROWSER_TTL_SECONDS//3600}h old)")
+            slog(f"[browser-reaper] hard-killed {reaped} orphan Chrome processes "
+                 f"(>{_BROWSER_MAX_TTL_SECONDS//3600}h old)")
     except Exception:
         pass
 
@@ -32220,7 +32253,7 @@ def main():
     # Register all recurring jobs with the unified scheduler
     schedule_job(_yolo_loop,             interval=3,                    name="yolo",        initial_delay=3)
     schedule_job(_snapshot_loop,         interval=60,                   name="snapshot",    initial_delay=0)
-    schedule_job(_reap_stale_browsers,  interval=600,                  name="browser_reap", initial_delay=60)
+    schedule_job(_reap_stale_browsers,  interval=120,                  name="browser_reap", initial_delay=60)
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
