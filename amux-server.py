@@ -856,12 +856,58 @@ def parse_env_file(path: Path) -> dict:
     return data
 
 
+def _atomic_write_secure(path: Path, content: str) -> None:
+    """Atomically and durably write content to path with mode 0o600.
+
+    Uses NamedTemporaryFile (which calls mkstemp under the hood, defaulting
+    to mode 0o600) plus flush + fsync + os.replace for a crash-safe atomic
+    write. The result file at `path` never exists with permissions other
+    than 0o600 — even briefly. After this function returns successfully,
+    the data is durably persisted to disk: a system crash cannot leave
+    `path` empty or partially-written.
+
+    Use this for any .env file that may contain secrets or per-user config.
+    """
+    import tempfile
+    dir_path = str(path.parent)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=dir_path,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as tmp:
+        tmp.write(content)
+        # Flush Python's userspace buffer to the OS kernel buffer, then
+        # flush the kernel buffer to disk. Without this, a system crash
+        # after os.replace() could leave the file at `path` with empty
+        # or stale contents — the rename succeeded but the data wasn't
+        # yet persisted. fsync is the canonical durability barrier.
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = tmp.name
+    try:
+        os.replace(tmp_path, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _write_env(path: Path, cfg: dict):
-    """Write a cfg dict back to a amux .env file."""
+    """Write a cfg dict back to a amux .env file with secure permissions.
+
+    Uses _atomic_write_secure to ensure the file is created with mode 0o600,
+    preventing world-readable .env files that may contain secrets like
+    ANTHROPIC_API_KEY or per-session credentials.
+    """
     lines = [f'# updated: {__import__("datetime").datetime.now().isoformat()}']
     for k, v in cfg.items():
         lines.append(f'{k}="{v}"')
-    path.write_text("\n".join(lines) + "\n")
+    _atomic_write_secure(path, "\n".join(lines) + "\n")
 
 
 # ═══════════════════════════════════════════
@@ -4653,6 +4699,177 @@ def _ensure_memory(name: str, work_dir: str):
     _write_claude_memory(name, work_dir)
 
 
+# Permissive model-name validator. The negative lookahead (?!-) explicitly
+# rejects values starting with '-' which would be re-parsed as a flag by
+# claude's argv parser even after shell-quoting (application-level argument
+# injection — e.g. '-p', '--api-key', '--dangerously-skip-permissions').
+# All other leading characters are allowed including '.', '/', '[' so local
+# model paths like './model' or '/opt/local-model' work for users who use
+# amux to drive non-Anthropic LLM CLIs. The body character class permits
+# the '[1m]' suffix (1M context variants), slash/at-sign forms used by
+# Bedrock/Vertex/OpenRouter (e.g. anthropic/claude-3-opus, claude-3@latest),
+# and '+' for HuggingFace-style variants. Rejects shell metacharacters
+# (; | $ ` > < & ( ) { } \ space \n).
+#
+# Defense in depth — the spawn-side _shell_quote_flags is the load-bearing
+# fix; this just stops obviously malformed or injection-attempting data from
+# being persisted in the first place.
+_MODEL_ID_RE = re.compile(r'^(?!-)[A-Za-z0-9._:\[\]@/+-]+$')
+_MODEL_ID_MAX_LEN = 255  # bound to prevent DoS via huge JSON payloads
+
+
+def _strip_model_from_flags(flags: str) -> str:
+    """Remove any --model X or --model=X tokens from a flag string.
+
+    Uses shlex tokenization to correctly handle both space-separated
+    (`--model X`) and equals-separated (`--model=X`) forms, plus quoted
+    multi-word values that a naive regex would miss or corrupt.
+
+    Returns the remaining flags as a shell-safe string (each token
+    re-quoted via shlex.quote) so the result can be safely stored
+    back in a .env file.
+
+    Raises ValueError if `flags` cannot be tokenized (e.g. unbalanced
+    quotes in a hand-edited config file). Callers MUST catch this and
+    surface a clear error to the user — silently returning the empty
+    string here would wipe out all the user's other flags during a
+    routine model update, which is a data-loss bug.
+
+    Used by both PATCH endpoints (/api/settings/default-model and
+    /api/sessions/{name}) so the substitution semantics are identical.
+    """
+    if not flags:
+        return ""
+    tokens = shlex.split(flags)  # raises ValueError on malformed input
+    filtered = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--model" and i + 1 < len(tokens):
+            i += 2  # skip --model and its value
+            continue
+        if t.startswith("--model="):
+            i += 1  # skip the --model=X form
+            continue
+        filtered.append(t)
+        i += 1
+    return " ".join(shlex.quote(t) for t in filtered)
+
+
+def _extract_model_from_flags(flags: str) -> str:
+    """Return the --model value from a flag string, or empty string if none.
+
+    Mirror of _strip_model_from_flags but for extraction. Handles both
+    `--model X` and `--model=X` forms via shlex tokenization. On malformed
+    input (unbalanced quotes etc.) returns empty string — this is a
+    read-only display helper, so silent fallback is appropriate.
+    """
+    if not flags:
+        return ""
+    try:
+        tokens = shlex.split(flags)
+    except ValueError:
+        return ""
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--model" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if t.startswith("--model="):
+            return t[len("--model="):]
+        i += 1
+    return ""
+
+
+def _validate_model_name(value) -> tuple[bool, str, str]:
+    """Validate a model name field from a PATCH body.
+
+    Returns (ok, normalized_value, error_message). Used by both PATCH
+    endpoints (/api/settings/default-model and /api/sessions/{name})
+    so the type/length/regex checks are defined in exactly one place.
+
+    Empty string is permitted at this level — callers decide whether
+    empty means "clear the override" or "missing required field" based
+    on endpoint semantics.
+    """
+    if not isinstance(value, str):
+        return False, "", "model must be a string"
+    normalized = value.strip()
+    if len(normalized) > _MODEL_ID_MAX_LEN:
+        return False, "", f"model name too long (max {_MODEL_ID_MAX_LEN} chars)"
+    if normalized and not _MODEL_ID_RE.match(normalized):
+        return False, "", "invalid model name (allowed: alphanumeric and ._:[]@/+-, no leading hyphen)"
+    return True, normalized, ""
+
+
+def _shell_quote_flags(s: str) -> str:
+    """Tokenize a stored flag string and re-quote each token shell-safely.
+
+    Flag strings come from .env files written by various paths (settings UI,
+    REST API, bash CLI, hand edits) and are concatenated into a shell command
+    in start_session(). Stored values may contain shell metacharacters — most
+    notably '[1m]' in the 1M-context model IDs 'claude-opus-4-6[1m]' and
+    'claude-sonnet-4-6[1m]', which zsh treats as a glob character class and
+    fails with 'no matches found' under nomatch. Round-tripping through shlex
+    enforces the invariant: every flag token reaches /bin/sh as a single
+    literal argument, never interpreted by the shell.
+
+    On malformed input (e.g. unbalanced quote in a hand-edited env file),
+    shlex.split raises ValueError. The fallback wraps the entire raw string
+    as a single shlex.quote()'d literal — the shell still receives one safe
+    token, claude itself rejects the bogus flag with a clear error message,
+    and the spawn doesn't brick. The security invariant (shell never
+    interprets stored data) is preserved on every code path.
+
+    NOTE on shlex.split's `#`-handling: by default shlex.split treats an
+    unquoted `#` as the start of a comment and strips the rest of the
+    token (e.g. `--model opus # my note` becomes `['--model', 'opus']`).
+    This is standard shlex behavior. amux config files don't typically
+    use inline comments, so this is unlikely to surprise users.
+
+    BEHAVIOR CHANGE from pre-fix amux: stored flag values are now treated
+    as literal data, NOT as shell expressions. If a user previously stored
+    `CC_FLAGS="--api-key $MY_API_KEY"` expecting the shell to expand
+    $MY_API_KEY at spawn time, that pattern no longer works — the value
+    will be passed to claude as the literal string `$MY_API_KEY`. This is
+    intentional: stored shell fragments are exactly the kind of injection
+    vector this fix exists to neutralize. Users wanting dynamic secrets
+    should set them in their shell profile (e.g. `~/.zprofile`) so they
+    appear as environment variables in the spawned tmux session, not
+    embedded in stored flag strings.
+
+    SECURITY NOTE: this helper makes the shell-command string injection-safe,
+    but flag VALUES still appear in `ps aux` output because tmux runs them as
+    argv. Do not store secrets (API keys, tokens) in CC_FLAGS or
+    CC_DEFAULT_FLAGS. A future refactor to pass sensitive flags via
+    environment variables would close this gap.
+    """
+    if not s:
+        return ""
+    try:
+        return " ".join(shlex.quote(t) for t in shlex.split(s))
+    except ValueError:
+        # Malformed input — quote the whole raw string so it reaches the
+        # shell as one literal argument. claude will reject it with a
+        # clearer error than aborting spawn would give us.
+        return shlex.quote(s)
+
+
+def _get_default_model() -> str:
+    """Return the default model from defaults.env, or 'sonnet' as fallback.
+
+    Uses _extract_model_from_flags so both --model X and --model=X forms
+    are correctly recognized, and quoted multi-word values aren't truncated.
+    """
+    defaults_file = CC_HOME / "defaults.env"
+    if defaults_file.exists():
+        dcfg = parse_env_file(defaults_file)
+        model = _extract_model_from_flags(dcfg.get("CC_DEFAULT_FLAGS", ""))
+        if model:
+            return model
+    return "sonnet"
+
+
 def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False) -> tuple[bool, str]:
     """Start a session headless (no attach). Returns (success, message)."""
     f = CC_SESSIONS / f"{name}.env"
@@ -4706,13 +4923,13 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
 
     cmd = "claude"
     if default_flags:
-        cmd += f" {default_flags}"
+        cmd += f" {_shell_quote_flags(default_flags)}"
     if flags:
-        cmd += f" {flags}"
+        cmd += f" {_shell_quote_flags(flags)}"
     if session_flag:
-        cmd += f" {session_flag}"
+        cmd += f" {_shell_quote_flags(session_flag)}"
     if extra_flags:
-        cmd += f" {extra_flags}"
+        cmd += f" {_shell_quote_flags(extra_flags)}"
     # Inject --mcp-config based on CC_MCP setting (chrome or empty)
     mcp_val = cfg.get("CC_MCP", "").strip().lower()
     mcp_dir = CC_HOME  # ~/.amux
@@ -9029,6 +9246,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">
+          <div class="settings-section-label">Default Model</div>
+          <div style="font-size:0.72rem;color:var(--dim);margin-bottom:6px;">Applied to new sessions without an explicit model</div>
+          <select id="settings-default-model" onchange="saveDefaultModel(this.value)"
+            style="width:100%;font-size:0.85rem;padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--fg);">
+            <option value="sonnet">sonnet</option>
+            <option value="opus">opus</option>
+            <option value="haiku">haiku</option>
+            <option value="claude-opus-4-6">claude-opus-4-6</option>
+            <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
+            <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+            <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
+            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+          </select>
+        </div>
+        <div class="settings-sep"></div>
+        <div class="settings-section">
           <div class="settings-section-label">Appearance</div>
           <div class="settings-row" style="justify-content:space-between;align-items:center;">
             <span style="font-size:0.85rem;" id="theme-label">Dark mode</span>
@@ -10302,12 +10535,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div id="edit-ac-list" class="ac-list"></div>
     </div>
     <select id="edit-select" style="display:none;" onchange="submitEdit()">
-      <option value="">Default (sonnet)</option>
+      <option value="" id="model-default-opt">Default</option>
       <option value="opus">opus</option>
       <option value="sonnet">sonnet</option>
       <option value="haiku">haiku</option>
       <option value="claude-opus-4-6">claude-opus-4-6</option>
+      <option value="claude-opus-4-6[1m]">claude-opus-4-6 [1M]</option>
       <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+      <option value="claude-sonnet-4-6[1m]">claude-sonnet-4-6 [1M]</option>
       <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
     </select>
     <div class="edit-actions">
@@ -12396,6 +12631,12 @@ function closeAddMenu() {
   if (!addMenuOpen) return;
   document.getElementById('add-menu').classList.remove('open');
   addMenuOpen = false;
+}
+
+// ── Set default model label from server config ──
+if (window._AMUX_DEFAULT_MODEL) {
+  const defOpt = document.getElementById('model-default-opt');
+  if (defOpt) defOpt.textContent = 'Default (' + window._AMUX_DEFAULT_MODEL + ')';
 }
 
 // ── Edit modal ──
@@ -21902,6 +22143,7 @@ function toggleSettings() {
   const open = menu.classList.toggle('open');
   if (open) {
     _renderInstanceSwitcher();
+    loadDefaultModel();
     // Apply cloud identity (email) or device name
     _applyIdentityToSettings();
     if (!_cloudEmail) {
@@ -22018,6 +22260,34 @@ document.addEventListener('click', function(e) {
   const wrap = document.querySelector('.settings-wrap');
   if (wrap && !wrap.contains(e.target)) closeSettings();
 });
+
+// ── Default Model ────────────────────────────────────────────────────────────
+function loadDefaultModel() {
+  const sel = document.getElementById('settings-default-model');
+  if (sel && window._AMUX_DEFAULT_MODEL) {
+    if (!Array.from(sel.options).some(o => o.value === window._AMUX_DEFAULT_MODEL)) {
+      const opt = document.createElement('option');
+      opt.value = window._AMUX_DEFAULT_MODEL;
+      opt.textContent = window._AMUX_DEFAULT_MODEL;
+      sel.appendChild(opt);
+    }
+    sel.value = window._AMUX_DEFAULT_MODEL;
+  }
+}
+async function saveDefaultModel(val) {
+  try {
+    const r = await fetch('/api/settings/default-model', {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({model: val})
+    });
+    if (r.ok) {
+      window._AMUX_DEFAULT_MODEL = val;
+      const defOpt = document.getElementById('model-default-opt');
+      if (defOpt) defOpt.textContent = 'Default (' + val + ')';
+      showToast('Default model: ' + val);
+    }
+  } catch(e) { showToast('Error: ' + e.message); }
+}
 
 // ── API Keys ───────────────────────────────────────────────────────────────────
 async function loadApiKeys() {
@@ -27339,7 +27609,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
                 f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
                 f'window._AMUX_HOME={_json.dumps(str(Path.home()))};'
-                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};</script></head>',
+                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};'
+                f'window._AMUX_DEFAULT_MODEL={_json.dumps(_get_default_model())};</script></head>',
                 1,
             )
             return self._html(page)
@@ -30304,6 +30575,73 @@ end tell
             db.commit()
             return self._json({"ok": True})
 
+        # ── Default model (reads/writes defaults.env) ──────────────────────────
+        if path == "/api/settings/default-model":
+            defaults_file = CC_HOME / "defaults.env"
+            if method == "GET":
+                return self._json({"model": _get_default_model()})
+            if method == "PATCH":
+                body = self._read_body()
+                if not isinstance(body, dict):
+                    return self._json({"error": "payload must be a JSON object"}, 400)
+                # Empty model = clear the --model override; other flags in
+                # CC_DEFAULT_FLAGS (like --max-tokens, --effort) are preserved.
+                # On a non-empty model, the existing --model X is REPLACED but
+                # all other flags are preserved — without this, picking a new
+                # default model in the UI would silently delete the user's
+                # custom flag config.
+                ok, model, err = _validate_model_name(body.get("model", ""))
+                if not ok:
+                    return self._json({"error": err}, 400)
+                # Read existing defaults.env once. The lines list serves both
+                # for extracting the current CC_DEFAULT_FLAGS value AND for
+                # the line-by-line substitution below. Reading the file twice
+                # would create a TOCTOU window where another writer could
+                # modify the file between reads.
+                lines = []
+                if defaults_file.exists():
+                    lines = defaults_file.read_text(encoding="utf-8").splitlines()
+                existing_flags = ""
+                for line in lines:
+                    if line.startswith("CC_DEFAULT_FLAGS="):
+                        value = line[len("CC_DEFAULT_FLAGS="):]
+                        # Strip outer matching quotes (mirrors parse_env_file).
+                        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                            value = value[1:-1]
+                        existing_flags = value
+                        break
+                try:
+                    flags_no_model = _strip_model_from_flags(existing_flags)
+                except ValueError as e:
+                    return self._json({
+                        "error": f"existing CC_DEFAULT_FLAGS in defaults.env is malformed ({e}); fix the file manually before updating the model via API"
+                    }, 400)
+                # Build the new flag value: prepend --model if non-empty, else
+                # leave the (possibly empty) other flags as-is.
+                if model:
+                    new_flag_value = (
+                        f"--model {model} {flags_no_model}".strip()
+                        if flags_no_model
+                        else f"--model {model}"
+                    )
+                else:
+                    new_flag_value = flags_no_model
+                new_line = f'CC_DEFAULT_FLAGS="{new_flag_value}"'
+                # Substitute in the lines we already loaded above (single read).
+                found = False
+                for i, line in enumerate(lines):
+                    if line.startswith("CC_DEFAULT_FLAGS="):
+                        lines[i] = new_line
+                        found = True
+                        break
+                if not found:
+                    lines.append(new_line)
+                content = "\n".join(lines) + "\n"
+                # Atomic write with mode 0o600 (no TOCTOU window). Same
+                # secure-write pattern as the shared _write_env helper.
+                _atomic_write_secure(defaults_file, content)
+                return self._json({"ok": True, "model": model})
+
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
             _allowed_env_keys = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
@@ -31672,6 +32010,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
         if method == "PATCH":
             if action == "config":
                 body = self._read_body()
+                if not isinstance(body, dict):
+                    return self._json({"error": "payload must be a JSON object"}, 400)
                 cfg = parse_env_file(env_file)
 
                 # Rename
@@ -31731,12 +32071,28 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
 
                 # Change model
                 if "model" in body:
-                    model_val = body["model"].strip()
-                    flags = cfg.get("CC_FLAGS", "")
-                    # Remove existing --model flag
-                    flags = re.sub(r'--model\s+\S+\s*', '', flags).strip()
+                    ok, model_val, err = _validate_model_name(body["model"])
+                    if not ok:
+                        return self._json({"error": err}, 400)
+                    # Strip any existing --model X / --model=X via the shared
+                    # shlex-based helper so quoted multi-word values and the
+                    # equals-form aren't corrupted. On parse failure (malformed
+                    # CC_FLAGS in the session env file), surface a 400 rather
+                    # than silently wiping out the user's other flags.
+                    try:
+                        flags_no_model = _strip_model_from_flags(cfg.get("CC_FLAGS", ""))
+                    except ValueError as e:
+                        return self._json({
+                            "error": f"existing CC_FLAGS for session '{name}' is malformed ({e}); fix the .env file manually before updating the model"
+                        }, 400)
                     if model_val:
-                        flags = f"--model {model_val} {flags}".strip()
+                        flags = (
+                            f"--model {model_val} {flags_no_model}".strip()
+                            if flags_no_model
+                            else f"--model {model_val}"
+                        )
+                    else:
+                        flags = flags_no_model
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
                     # Also send /model to running session so it takes effect immediately
