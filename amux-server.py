@@ -16109,32 +16109,21 @@ function toggleLogSearch() {
 }
 
 async function _runLogSearch() {
-  const q = searchQuery.toLowerCase().trim();
+  const q = searchQuery.trim();
   if (!q || !logSearchMode) { _logMatches = {}; render(); return; }
   // Cancel any in-flight search
   if (_logSearchAbort) _logSearchAbort.abort();
   _logSearchAbort = new AbortController();
   const sig = _logSearchAbort.signal;
-  const sessionList = sessions || [];
-  const results = await Promise.allSettled(
-    sessionList.map(s =>
-      fetch(API + '/api/sessions/' + encodeURIComponent(s.name) + '/peek?lines=500', { signal: sig })
-        .then(r => r.json())
-        .then(data => {
-          const output = data.output || '';
-          const lines = output.split('\n');
-          const hits = [];
-          lines.forEach((l, i) => { if (l.toLowerCase().includes(q)) hits.push({ line: i + 1, text: l.replace(/\x1b\[[0-9;?]*m/g, '').trim() }); });
-          if (!hits.length) return null;
-          return { name: s.name, hits };
-        })
-        .catch(() => null)
-    )
-  );
-  if (sig.aborted) return;
-  _logMatches = {};
-  results.forEach(r => { if (r.status === 'fulfilled' && r.value) _logMatches[r.value.name] = r.value.hits; });
-  render();
+  try {
+    const r = await fetch(API + '/api/log-search?q=' + encodeURIComponent(q) + '&max=50', { signal: sig });
+    if (sig.aborted) return;
+    const d = await r.json();
+    _logMatches = d.matches || {};
+    render();
+  } catch (e) {
+    if (e.name !== 'AbortError') { _logMatches = {}; render(); }
+  }
 }
 function clearPeekSearch() {
   const inp = document.getElementById('peek-search');
@@ -31779,6 +31768,44 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
         # ── Torrents (/api/torrents/*) ────────────────────────────────────────
         if path.startswith("/api/torrents"):
             return self._handle_torrents(method, path, qs)
+
+        # ── Log search across all session log files ──
+        # GET /api/log-search?q=<query>&max=<per-session>
+        # Greps the on-disk session log files (not just the in-memory PTY buffer)
+        # and returns hits per session: { matches: { name: [{line, text}, ...] } }
+        if method == "GET" and path == "/api/log-search":
+            q = qs.get("q", [""])[0].strip()
+            if not q:
+                return self._json({"matches": {}})
+            try:
+                max_per = int(qs.get("max", ["50"])[0])
+            except ValueError:
+                max_per = 50
+            max_per = max(1, min(500, max_per))
+            ql = q.lower()
+            ansi_re = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+            matches: dict[str, list[dict]] = {}
+            try:
+                files = sorted(CC_LOGS.glob("*.log"))
+            except Exception:
+                files = []
+            for lp in files:
+                sess_name = lp.stem
+                try:
+                    text = lp.read_text(errors="replace")
+                except Exception:
+                    continue
+                hits: list[dict] = []
+                for i, raw in enumerate(text.splitlines(), start=1):
+                    if ql in raw.lower():
+                        clean = ansi_re.sub("", raw).strip()
+                        if clean:
+                            hits.append({"line": i, "text": clean[:500]})
+                            if len(hits) >= max_per:
+                                break
+                if hits:
+                    matches[sess_name] = hits
+            return self._json({"matches": matches, "q": q})
 
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
