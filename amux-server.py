@@ -10701,7 +10701,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- Channel drawer (session-to-session DM) -->
-<div id="channel-drawer" class="channel-drawer" onclick="if(event.target===this)channelClose()">
+<div id="channel-drawer" class="channel-drawer" onmousedown="this.dataset.bdMousedown=event.target===this?'1':''" onclick="if(event.target===this&&this.dataset.bdMousedown==='1'&&!this.dataset.justOpened)channelClose();this.dataset.bdMousedown=''">
   <div class="channel-panel" role="dialog" aria-label="Session channel">
     <div class="channel-header">
       <div class="channel-header-title">
@@ -14841,14 +14841,24 @@ let _channelPollTimer = null;
 let _channelLastTs = 0;
 
 function channelOpen(me, other, prefillText) {
-  if (!me || !other || me === other) return;
+  if (!me || !other || me === other) {
+    showToast('Cannot open channel: ' + (!me?'no source':!other?'no target':'same session'));
+    return;
+  }
   _channelMe = me;
   _channelOther = other;
   _channelLastTs = 0;
   document.getElementById('channel-header-pair').textContent = me + ' ↔ ' + other;
   document.getElementById('channel-thread').innerHTML =
     '<div class="channel-empty">Loading…</div>';
-  document.getElementById('channel-drawer').classList.add('open');
+  const drawer = document.getElementById('channel-drawer');
+  drawer.classList.add('open');
+  // Suppress backdrop-close from the click that opened us — the original
+  // mousedown was on a card-input dropdown item, but the click event that
+  // follows may now land on this drawer's backdrop (since we're on top).
+  drawer.dataset.justOpened = '1';
+  drawer.dataset.bdMousedown = '';
+  setTimeout(() => { delete drawer.dataset.justOpened; }, 400);
   const inp = document.getElementById('channel-input');
   inp.value = prefillText || '';
   setTimeout(() => inp.focus(), 100);
@@ -14858,7 +14868,10 @@ function channelOpen(me, other, prefillText) {
 }
 
 function channelClose() {
-  document.getElementById('channel-drawer').classList.remove('open');
+  const drawer = document.getElementById('channel-drawer');
+  drawer.classList.remove('open');
+  delete drawer.dataset.justOpened;
+  drawer.dataset.bdMousedown = '';
   if (_channelPollTimer) { clearInterval(_channelPollTimer); _channelPollTimer = null; }
   _channelMe = null; _channelOther = null;
 }
