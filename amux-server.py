@@ -21799,8 +21799,12 @@ function connectSSE() {
     if (_initialLoad) { _initialLoad = false; render(); }
     if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
     if (!online) setOnline(true);
-    // On reconnect after being offline: run delta sync to catch any missed changes
-    if (wasOffline && _sseRetries > 0) setTimeout(_runDeltaSync, 500);
+    // On reconnect after being offline / zombie: catch up on anything we missed.
+    // Note: _sseRetries is reset above, so we key off wasOffline alone.
+    if (wasOffline) {
+      setTimeout(_runDeltaSync, 200);
+      setTimeout(() => { fetchSessions(); fetchBoard(); }, 250);
+    }
     try {
       const msg = JSON.parse(e.data);
       if (msg.type === 'sessions') {
@@ -21856,6 +21860,8 @@ function connectSSE() {
             if (activeView === 'journal') _journalLoad();
           }
         }
+      } else if (msg.type === 'ping') {
+        // Liveness signal — _lastDataTime already updated above. Nothing else to do.
       }
     } catch(err) { console.error('SSE parse:', err); }
   };
@@ -21879,9 +21885,61 @@ function connectSSE() {
 function enablePollingFallback() {
   _sseFallback = true;
   if (_sse) { _sse.close(); _sse = null; }
-  fetchSessions();
-  if (!_pollTimer) _pollTimer = setInterval(fetchSessions, 5000);
+  fetchSessions(); fetchBoard(); _runDeltaSync();
+  if (!_pollTimer) _pollTimer = setInterval(() => {
+    fetchSessions(); fetchBoard();
+  }, 5000);
 }
+
+// ── Freshness watchdog & resume handlers ───────────────────────────────────
+// Goal: every client always has the most up-to-date state, even after the OS
+// pauses the tab (iOS Safari background, macOS App Nap, sleep/wake, BFCache).
+//
+// Strategy:
+//   1. Server pings every 10s as a real data event → _lastDataTime ticks.
+//   2. A watchdog interval checks staleness only while the page is visible.
+//   3. visibilitychange / pageshow / focus / online → force a reconnect-and-resync
+//      if we look stale, otherwise just kick a fetch.
+const _SSE_STALE_MS = 18000;     // declared zombie if no data this long
+const _SSE_REFRESH_MS = 4000;    // visibility-resume refresh threshold
+
+function _sseLooksStale() {
+  return _lastDataTime && (Date.now() - _lastDataTime > _SSE_STALE_MS);
+}
+function _forceSseReconnect(reason) {
+  _dbgLog('SSE reconnect: ' + reason);
+  if (_sse) { try { _sse.close(); } catch(e) {} _sse = null; }
+  _sseRetries = 0;
+  _liveSSE = false;
+  updateConnectionStatus();
+  connectSSE();
+}
+function _resyncEverything() {
+  fetchSessions();
+  fetchBoard();
+  _runDeltaSync();
+}
+function _onClientResume(reason) {
+  if (document.hidden) return;
+  // Always pull fresh state — cheap and the user expects up-to-date data.
+  if (_lastDataTime && Date.now() - _lastDataTime > _SSE_REFRESH_MS) {
+    _resyncEverything();
+  }
+  // If the SSE connection looks dead (zombie after iOS background), bounce it.
+  if (!_sseFallback && (_sseLooksStale() || !_sse)) {
+    _forceSseReconnect(reason);
+  }
+}
+document.addEventListener('visibilitychange', () => _onClientResume('visibility'));
+window.addEventListener('pageshow',  e => _onClientResume(e.persisted ? 'bfcache' : 'pageshow'));
+window.addEventListener('focus',     () => _onClientResume('focus'));
+window.addEventListener('online',    () => _onClientResume('online'));
+// Periodic stale-watchdog — only fires when visible, so it's cheap on phones.
+setInterval(() => {
+  if (document.hidden) return;
+  if (_sseFallback) return;
+  if (_sseLooksStale()) _forceSseReconnect('watchdog stale ' + Math.round((Date.now() - _lastDataTime)/1000) + 's');
+}, 5000);
 
 // Start SSE (falls back to polling on failure)
 connectSSE();
@@ -27811,10 +27869,14 @@ class CCHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {json.dumps({'type': 'invalidate', 'keys': invalidated})}\n\n".encode())
                     self.wfile.flush()
 
-                # Heartbeat every 15s (7-8 iterations at 2s sleep)
+                # Ping every 10s as a real data event so client onmessage fires
+                # and _lastDataTime ticks. Plain SSE comments do NOT trigger
+                # onmessage, so we'd otherwise be unable to distinguish a quiet
+                # stream from a zombie connection (iOS Safari pauses EventSource
+                # in the background without firing error).
                 heartbeat_counter += 1
-                if heartbeat_counter >= 8:
-                    self.wfile.write(b": heartbeat\n\n")
+                if heartbeat_counter >= 5:
+                    self.wfile.write(f"data: {json.dumps({'type': 'ping', 'ts': int(now)})}\n\n".encode())
                     self.wfile.flush()
                     heartbeat_counter = 0
 
