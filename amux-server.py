@@ -178,7 +178,6 @@ CC_GMAIL.mkdir(parents=True, exist_ok=True)
 CC_BRANDING.mkdir(parents=True, exist_ok=True)
 CC_JOURNAL_MEDIA.mkdir(parents=True, exist_ok=True)
 
-UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
 CLAUDE_HOME = Path.home() / ".claude"
 
@@ -667,8 +666,8 @@ _sse_cache_lock = threading.Lock()  # prevents thundering herd on cache refresh
 _SSE_CACHE_TTL = 2  # seconds
 
 # ── Structured event log (in-memory ring buffer, 2 000 events) ─────────────────
-import collections as _col
-_event_log: "collections.deque[dict]" = _col.deque(maxlen=2000)
+import collections
+_event_log: "collections.deque[dict]" = collections.deque(maxlen=2000)
 _event_log_lock = threading.Lock()
 _req_tl = threading.local()  # per-request enrichment (set by handlers, read by _route)
 
@@ -771,7 +770,7 @@ def _refresh_token_cache():
     now = time.time()
     if now - _token_cache["time"] < _TOKEN_CACHE_TTL:
         return
-    from datetime import datetime, timezone
+    from datetime import datetime
     result = {}
     ts_result = {}
     projects_dir = Path.home() / ".claude" / "projects"
@@ -1137,45 +1136,6 @@ def _push_alert(alert_type: str, session: str, message: str):
         _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
         if len(_sse_alerts) > 50:
             _sse_alerts = _sse_alerts[-50:]
-
-
-# ── Event log (persistent, streamed via SSE) ─────────────────────────
-_log_ring: list = []   # in-memory ring buffer for SSE push
-_log_ring_lock = threading.Lock()
-
-def _log_event(category: str, action: str, *, session: str = None,
-               actor: str = None, detail: str = None, level: str = "info"):
-    """Write an event to the logs table and push to SSE clients."""
-    ts = int(time.time())
-    try:
-        db = get_db()
-        db.execute(
-            "INSERT INTO logs (ts, category, action, session, actor, detail, level) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (ts, category, action, session, actor, detail, level))
-        db.commit()
-    except Exception:
-        pass
-    evt = {"ts": ts, "category": category, "action": action,
-           "type": category, "target": detail,  # aliases for _event_log schema compat
-           "session": session, "actor": actor, "detail": detail, "level": level}
-    with _log_ring_lock:
-        _log_ring.append(evt)
-        if len(_log_ring) > 100:
-            _log_ring[:] = _log_ring[-100:]
-    # Also push to the SSE event log ring so the Logs tab receives it live
-    with _event_log_lock:
-        _event_log.append(evt)
-    # Auto-log meaningful actions to the session's active board issue
-    if session and category in ("session", "board", "memory", "git"):
-        _SKIP_ACTIONS = {"peeked", "message-sent"}  # noisy / already captured
-        if action not in _SKIP_ACTIONS:
-            issue_id = _session_board_issue_id(session)
-            if issue_id:
-                msg = f"**{action}**"
-                if detail:
-                    msg += f" — {detail[:200]}"
-                threading.Thread(target=_append_board_log, args=(issue_id, msg), daemon=True).start()
 
 
 def _last_meaningful_user_message(work_dir: str) -> str:
@@ -2298,7 +2258,7 @@ esac
 def _sync_skills_to_commands():
     """Write a single skill to ~/.claude/commands/ after save."""
     try:
-        import pathlib as _p, json as _j
+        import pathlib as _p
         commands_dir = _p.Path.home() / ".claude" / "commands"
         commands_dir.mkdir(parents=True, exist_ok=True)
         db = get_db()
@@ -2417,7 +2377,7 @@ def _report_fetch_render(cfg):
 
 
 def _report_fetch_mongo(cfg):
-    import json as _j, urllib.request as _ur, urllib.parse as _up
+    import json as _j, urllib.parse as _up
     import hashlib as _hl, http.client as _hc, ssl as _ssl, time as _t
     pub  = os.environ.get("AMUX_MONGO_PUBLIC_KEY", "")
     priv = os.environ.get("AMUX_MONGO_PRIVATE_KEY", "")
@@ -3109,7 +3069,6 @@ def _gcal_sync_item(item_id: str, title: str = "", due: str = "", due_time: str 
 
 def _cron_next_run(parts: list, base) -> str | None:
     """Compute next fire time for a 5-field cron spec (MIN HOUR DOM MON DOW)."""
-    from datetime import timedelta
 
     def _matches(value: int, spec: str) -> bool:
         if spec == '*':
@@ -3522,7 +3481,7 @@ def _gcal_sync_bg(item_id, **kwargs):
 
 def get_daily_token_stats() -> dict:
     """Get today's token usage across all Claude Code sessions and amux sessions."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     today = datetime.now().strftime("%Y-%m-%d")
     projects_dir = CLAUDE_HOME / "projects"
     if not projects_dir.is_dir():
@@ -4082,7 +4041,6 @@ def list_sessions() -> list:
         meta = _load_meta(name)
         last_activity = meta.get("last_send", 0) or meta.get("last_started", 0)
         session_created = tinfo.get("created", 0)
-        pane_title = tinfo.get("pane_title", "")
         raw = ""
         if running:
             raw = captures.get(name, "")
@@ -4217,22 +4175,6 @@ def _project_name(work_dir: str) -> str:
     """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
     resolved = str(Path(work_dir).expanduser().resolve())
     return resolved.replace("/", "-")
-
-
-def _session_actual_cwd(name: str) -> str | None:
-    """Return the actual CWD of a running session's tmux pane, or None if not running."""
-    try:
-        r = subprocess.run(
-            ["tmux", "display-message", "-t", tmux_target(name), "-p", "#{pane_current_path}"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if r.returncode == 0:
-            cwd = r.stdout.strip()
-            if cwd:
-                return cwd
-    except Exception:
-        pass
-    return None
 
 
 _GLOBAL_MEM_FILE = CC_MEMORY / "_global.md"
@@ -4382,44 +4324,6 @@ def _session_work_dir(name: str) -> str:
         if wd:
             return str(Path(wd).expanduser().resolve())
     return ""
-
-
-def _auto_create_branch(name: str, work_dir: str, env_file: "Path") -> bool:
-    """Auto-create a git branch for a session if work_dir is a git repo.
-    Returns True if a branch was created, False otherwise.
-    Sessions share the same working directory but get their own branch."""
-    try:
-        r = subprocess.run(
-            ["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if r.returncode != 0:
-            return False
-        branch = "session/" + re.sub(r"[^a-zA-Z0-9\-]", "-", name).strip("-")
-        # Check if branch already exists
-        rb = subprocess.run(
-            ["git", "-C", work_dir, "show-ref", "--verify", f"refs/heads/{branch}"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if rb.returncode == 0:
-            slog(f"[branch] {branch} already exists for {name}")
-            return True  # branch exists, session can use it
-        # Create branch from current HEAD
-        r2 = subprocess.run(
-            ["git", "-C", work_dir, "branch", branch],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r2.returncode != 0:
-            slog(f"[branch] create failed for {name}: {r2.stderr.strip()}")
-            return False
-        cfg = parse_env_file(env_file)
-        cfg["CC_BRANCH"] = branch
-        _write_env(env_file, cfg)
-        slog(f"[branch] created {branch} for session {name}")
-        return True
-    except Exception as e:
-        slog(f"[branch] auto-create error for {name}: {e}")
-        return False
 
 
 _git_info_cache: dict[str, tuple[float, dict]] = {}  # work_dir -> (timestamp, result)
@@ -30025,7 +29929,7 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # ── Reports API ───────────────────────────────────────────────────────
         if path == "/api/reports" or path.startswith("/api/reports/"):
-            import json as _json_r, time as _tr, urllib.request as _ur, urllib.error as _ue
+            import json as _json_r, time as _tr
             db = get_db()
 
             def _reports_list():
@@ -31122,10 +31026,10 @@ end tell
                 ).fetchone()
                 org = _get_org()
                 if not row:
-                    html = f"""<!doctype html><html><head><meta charset=utf-8><title>Invalid Invite</title>
-<style>body{{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
-.card{{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:32px;max-width:400px;text-align:center}}
-h2{{margin:0 0 12px;color:#f87171}}p{{color:#888;margin:0}}</style></head>
+                    html = """<!doctype html><html><head><meta charset=utf-8><title>Invalid Invite</title>
+<style>body{font-family:system-ui;background:#0d0d0d;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:32px;max-width:400px;text-align:center}
+h2{margin:0 0 12px;color:#f87171}p{color:#888;margin:0}</style></head>
 <body><div class=card><h2>Invite expired or invalid</h2><p>This invite link is no longer valid.</p></div></body></html>"""
                     return self._html(html, 410)
                 host = self.headers.get("Host", "localhost:8822")
@@ -32475,14 +32379,12 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         old_log.rename(new_log)
                     # Update board items referencing old session name
                     try:
-                        board_items = _load_board()
-                        changed = False
-                        for item in board_items:
-                            if item.get("session") == name:
-                                item["session"] = new_name
-                                changed = True
-                        if changed:
-                            _save_board(board_items)
+                        db = get_db()
+                        db.execute(
+                            "UPDATE issues SET session=? WHERE session=? AND deleted IS NULL",
+                            (new_name, name),
+                        )
+                        db.commit()
                     except Exception:
                         pass
                     return self._json({"ok": True, "message": f"renamed to {new_name}"})
@@ -32931,7 +32833,7 @@ def _validate_api_key() -> tuple[bool, str]:
                 "content-type": "application/json",
             },
         )
-        resp = urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=10).close()
         return True, ""
     except urllib.error.HTTPError as e:
         if e.code == 401:
@@ -32976,7 +32878,7 @@ def _watch_self(server):
                     settled_mtime = script.stat().st_mtime
                     if settled_mtime == new_mtime:
                         break
-                    slog(f"[restart] file changed again during debounce, resetting...")
+                    slog("[restart] file changed again during debounce, resetting...")
                     new_mtime = settled_mtime
                 uptime = int(time.time() - _server_start_time)
                 slog(f"[restart] {script.name} settled — restarting (uptime={uptime}s, requests={_server_request_count}, threads={threading.active_count()})")
@@ -33057,7 +32959,7 @@ def _ensure_self_signed(lan_ip: str, extra_ips: list = None):
         if entry not in san_parts:
             san_parts.append(entry)
     san = ",".join(san_parts)
-    print(f"\033[2m  Generating self-signed TLS cert...\033[0m")
+    print("\033[2m  Generating self-signed TLS cert...\033[0m")
     subprocess.run(
         ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", str(key_file), "-out", str(cert_file),
@@ -33111,7 +33013,7 @@ def _ensure_tls(lan_ip: str) -> tuple:
         return str(cert_file), str(key_file), "", None
 
     if subprocess.run(["which", "mkcert"], capture_output=True).returncode == 0:
-        print(f"\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
+        print("\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
         subprocess.run(
             ["mkcert", "-cert-file", str(cert_file), "-key-file", str(key_file),
              "localhost", "127.0.0.1", lan_ip],
@@ -33203,7 +33105,7 @@ def main():
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
 
     slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
-    print(f"\033[1m\033[34mamux\033[0m web dashboard running")
+    print("\033[1m\033[34mamux\033[0m web dashboard running")
     print(f"  Local:   {scheme}://localhost:{port}")
     if ts_hostname:
         print(f"  Tailscale: {scheme}://{ts_hostname}:{port}")
@@ -33214,17 +33116,17 @@ def main():
         print(f"\n  Open on your phone → {scheme}://{lan_ip}:{port}")
     if scheme == "https":
         if ts_hostname:
-            print(f"\033[32m  ✓ Tailscale HTTPS — trusted cert, no setup needed on phone\033[0m")
+            print("\033[32m  ✓ Tailscale HTTPS — trusted cert, no setup needed on phone\033[0m")
         else:
-            print(f"\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
+            print("\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
     else:
-        print(f"\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
+        print("\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
     if AUTH_TOKEN:
         print(f"\033[32m  ✓ Auth enabled — token in {_AUTH_TOKEN_FILE}\033[0m")
     else:
-        print(f"\033[33m  ⚠ Auth DISABLED — all endpoints are public\033[0m")
-    print(f"\033[2m  Auto-reload active — editing amux-server.py will restart\033[0m")
-    print(f"\n\033[2mPress Ctrl-C to stop\033[0m")
+        print("\033[33m  ⚠ Auth DISABLED — all endpoints are public\033[0m")
+    print("\033[2m  Auto-reload active — editing amux-server.py will restart\033[0m")
+    print("\n\033[2mPress Ctrl-C to stop\033[0m")
 
     # Plain HTTP cert server (so phones can fetch cert before trusting it)
     if scheme == "https":
