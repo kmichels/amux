@@ -1,8 +1,5 @@
 {
-  "model": {
-    "default": "sonnet",
-    "planMode": "opus"
-  },
+  "model": "claude-opus-4-6",
   "thinking": true,
   "permissions": {
     "allow": [
