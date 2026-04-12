@@ -4420,6 +4420,7 @@ _git_info_cache: dict[str, tuple[float, dict]] = {}  # work_dir -> (timestamp, r
 _GIT_INFO_TTL = 30  # seconds — branch names don't change that fast
 _git_subprocess_sem = threading.Semaphore(4)  # limit concurrent git subprocesses
 _GIT_INFO_DETAIL_TTL = 10  # seconds — detail view can be slightly fresher
+_GIT_INFO_CACHE_MAX_AGE = 300  # evict entries older than 5 min to prevent unbounded growth
 
 
 def _git_info(work_dir: str, detail: bool = False) -> dict:
@@ -4510,6 +4511,41 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
         return {"branch": "", "repo": ""}
     finally:
         _git_subprocess_sem.release()
+
+
+def _evict_stale_caches():
+    """Periodically prune expired entries from in-memory caches to prevent unbounded growth."""
+    now = time.time()
+    # Evict _git_info_cache entries older than max age
+    stale_git = [k for k, (ts, _) in list(_git_info_cache.items())
+                 if now - ts > _GIT_INFO_CACHE_MAX_AGE]
+    for k in stale_git:
+        _git_info_cache.pop(k, None)
+    # Evict _model_cache entries older than 5 min
+    stale_model = [k for k, (_, _, ts) in list(_model_cache.items())
+                   if now - ts > 300]
+    for k in stale_model:
+        _model_cache.pop(k, None)
+    # Prune session-keyed dicts for sessions that no longer have .env files
+    live_sessions = {f.stem for f in CC_SESSIONS.glob("*.env")}
+    for d in (_session_auto_actions, _yolo_last_responded, _last_jsonl_backup, _session_prev_status):
+        stale_keys = [k for k in d if k not in live_sessions]
+        for k in stale_keys:
+            d.pop(k, None)
+    with _send_locks_lock:
+        stale_locks = [k for k in _send_locks if k not in live_sessions]
+        for k in stale_locks:
+            _send_locks.pop(k, None)
+
+
+def _cleanup_session_state(name: str):
+    """Remove per-session in-memory state for a deleted session."""
+    _session_auto_actions.pop(name, None)
+    _yolo_last_responded.pop(name, None)
+    _last_jsonl_backup.pop(name, None)
+    _session_prev_status.pop(name, None)
+    with _send_locks_lock:
+        _send_locks.pop(name, None)
 
 
 def _init_default_sessions():
@@ -32569,6 +32605,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 (CC_MEMORY / f"{name}.md").unlink(missing_ok=True)
                 _meta_path(name).unlink(missing_ok=True)
                 _log_path(name).unlink(missing_ok=True)
+                _cleanup_session_state(name)
                 return self._json({"ok": True, "message": "deleted"})
             return self._json({"error": "not found"}, 404)
 
@@ -33426,6 +33463,7 @@ def main():
     schedule_job(_kill_stale_ray,        interval=600,                  name="ray_reap",     initial_delay=120)
     schedule_job(_refresh_token_cache,   interval=120,                  name="token_cache", initial_delay=5)
     schedule_job(_email_sync_job,        interval=_EMAIL_SYNC_INTERVAL, name="email_sync",  initial_delay=20)
+    schedule_job(_evict_stale_caches,    interval=300,                  name="cache_evict", initial_delay=60)
     schedule_job(_cleanup_tmp,           interval=1800,                 name="tmp_cleanup", initial_delay=60)
     schedule_job(_auto_archive_idle,     interval=3600,                 name="auto_archive", initial_delay=300)
     schedule_job(_enforce_archived_stopped, interval=600,                name="archive_enforce", initial_delay=30)
