@@ -14627,12 +14627,49 @@ async function _psfLoad(dirPath) {
         `<div class="fe-cell-size">${sizeStr}</div>` +
         `<div class="fe-cell-date">${dateStr}</div>` +
         `<div class="fe-cell-actions"></div>`;
-      row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => openFilePreview(entryPath);
+      row.onclick = entry.type === 'dir' ? () => _psfLoad(entryPath) : () => _psfViewFile(entryPath);
       body.appendChild(row);
     }
     if (!data.entries.length) {
       body.innerHTML = '<div style="padding:16px;color:var(--dim);text-align:center;font-size:0.82rem;">Empty folder</div>';
     }
+  } catch(e) {
+    body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+async function _psfViewFile(filePath) {
+  const body = document.getElementById('psf-body');
+  const bc = document.getElementById('psf-breadcrumb');
+  const dir = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
+  const fname = filePath.split('/').pop();
+  bc.innerHTML = '<span class="psf-crumb" onclick="_psfLoad(\'' + dir.replace(/'/g, "\\'") + '\')">← back</span><span style="color:var(--dim)"> / </span><span style="color:var(--text)">' + esc(fname) + '</span>';
+  body.innerHTML = '<div style="padding:12px;color:var(--dim)">Loading...</div>';
+  try {
+    let url = API + '/api/file?path=' + encodeURIComponent(filePath);
+    if (peekSessionDir) url += '&cwd=' + encodeURIComponent(peekSessionDir);
+    const r = await fetch(url);
+    const data = await r.json();
+    if (data.error) { body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(data.error) + '</div>'; return; }
+    body.innerHTML = '';
+    const content = document.createElement('div');
+    content.className = 'file-overlay-body';
+    content.style.cssText = 'flex:1;min-height:0;margin:0;border-radius:0;';
+    if (data.is_image) {
+      content.className = 'file-overlay-body file-image';
+      const img = document.createElement('img');
+      img.src = data.data_url;
+      img.style.cssText = 'max-width:100%;height:auto;border-radius:4px;display:block;margin:auto;';
+      content.appendChild(img);
+    } else if (data.is_markdown && data.html) {
+      content.className = 'file-overlay-body markdown-body';
+      content.innerHTML = data.html;
+    } else if (data.content != null) {
+      content.textContent = data.content;
+    } else {
+      content.textContent = '(binary file)';
+    }
+    body.appendChild(content);
   } catch(e) {
     body.innerHTML = '<div style="padding:12px;color:var(--dim)">Error: ' + esc(e.message) + '</div>';
   }
