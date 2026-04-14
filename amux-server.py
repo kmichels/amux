@@ -7514,11 +7514,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-split-files-header .psf-crumb:hover { text-decoration: underline; }
   .peek-split-files-body { flex: 1; min-height: 0; overflow-y: auto; }
   .peek-split-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
-  @media (max-width: 600px) {
-    .peek-split-wrap.split-active { flex-direction: column; }
-    .peek-split-wrap.split-active > .peek-terminal-panel { flex: 1; }
-    .peek-split-wrap.split-active > .peek-split-files { flex: 1; border-left: none; border-top: 1px solid var(--border); }
-  }
   .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
     padding: 14px 16px; gap: 10px; overflow: hidden; }
   .peek-memory-editor.active { display: flex; }
@@ -14576,6 +14571,11 @@ function closePeek() {
 let _peekSplitPath = null;
 
 function togglePeekSplit() {
+  // On mobile, open full-screen Files view instead of split pane
+  if (window.innerWidth <= 600) {
+    openExplore(peekSessionDir, peekSession);
+    return;
+  }
   const wrap = document.getElementById('peek-split-wrap');
   const btn = document.getElementById('peek-split-toggle');
   const active = wrap.classList.toggle('split-active');
