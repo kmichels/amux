@@ -1055,10 +1055,25 @@ def _log_path(session: str) -> Path:
     return CC_LOGS / f"{session}.log"
 
 
-def save_session_log(session: str, content: str):
-    """Append content to session log, trimming from the front when > MAX_LOG_BYTES."""
+_last_log_save: dict[str, float] = {}  # session -> monotonic time of last save
+_LOG_SAVE_INTERVAL = 30  # seconds between saves per session
+
+
+def save_session_log(session: str, content: str, force: bool = False):
+    """Append content to session log, trimming from the front when > MAX_LOG_BYTES.
+
+    Throttled to once per _LOG_SAVE_INTERVAL seconds per session to avoid
+    continuous 10MB read/write cycles when clients poll peek frequently.
+    Pass force=True to bypass the throttle (e.g. on session stop).
+    """
     if not content.strip():
         return
+    now = time.monotonic()
+    if not force:
+        last = _last_log_save.get(session, 0)
+        if now - last < _LOG_SAVE_INTERVAL:
+            return
+    _last_log_save[session] = now
     lp = _log_path(session)
     CC_LOGS.mkdir(parents=True, exist_ok=True)
     try:
