@@ -3875,7 +3875,8 @@ def _refresh_metrics_cache() -> None:
             _metrics_cache_ts = time.time()
         gc.collect()  # reclaim memory from JSONL parsing
     finally:
-        _metrics_refreshing = False
+        with _metrics_cache_lock:
+            _metrics_refreshing = False
 
 
 def get_system_metrics() -> dict:
@@ -3895,10 +3896,14 @@ def get_system_metrics() -> dict:
         return data
 
     # Trigger background refresh if stale (but only one at a time)
-    if cache_age > _METRICS_TTL and not _metrics_refreshing:
-        _metrics_refreshing = True
-        t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
-        t.start()
+    if cache_age > _METRICS_TTL:
+        with _metrics_cache_lock:
+            if _metrics_refreshing:
+                pass  # another thread already started a refresh
+            else:
+                _metrics_refreshing = True
+                t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
+                t.start()
 
     cached["cache_age_seconds"] = round(cache_age, 1)
     return cached
