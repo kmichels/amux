@@ -27497,14 +27497,15 @@ async function _bwGo() {
     else if (profile && profile.startsWith('pw:')) body.profile = profile.slice(3);
     const r = await fetch('/api/browser/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const d = await r.json();
-    if (d.success === false && d.error) { _bwStatus('Error: ' + d.error); return; }
+    if (d.error) { _bwStatus('Error: ' + d.error); return; }
     _bwStatus('Navigated');
     // Auto-screenshot after a delay
-    setTimeout(() => _bwScreenshot(), 2000);
+    setTimeout(() => _bwScreenshot(2), 2000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
-async function _bwScreenshot() {
+async function _bwScreenshot(retries) {
+  retries = retries || 0;
   _bwStatus('Taking screenshot...');
   try {
     const r = await fetch('/api/browser/screenshot?session=' + _bwSession + '&t=' + Date.now());
@@ -27516,10 +27517,20 @@ async function _bwScreenshot() {
       img.style.display = '';
       document.getElementById('bw-placeholder').style.display = 'none';
       _bwStatus('Screenshot taken');
+    } else if (retries > 0) {
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
     } else {
       _bwStatus(d.error || 'Screenshot failed');
     }
-  } catch(e) { _bwStatus('Error: ' + e.message); }
+  } catch(e) {
+    if (retries > 0) {
+      _bwStatus('Retrying screenshot...');
+      setTimeout(() => _bwScreenshot(retries - 1), 2000);
+    } else {
+      _bwStatus('Error: ' + e.message);
+    }
+  }
 }
 
 async function _bwClick(event) {
@@ -27533,7 +27544,7 @@ async function _bwClick(event) {
   _bwStatus('Clicking ' + x + ',' + y + '...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'click', x, y, session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(), 1000);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
@@ -27541,7 +27552,7 @@ async function _bwBack() {
   _bwStatus('Going back...');
   try {
     await fetch('/api/browser/action', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action: 'back', session: _bwSession }) });
-    setTimeout(() => _bwScreenshot(), 1000);
+    setTimeout(() => _bwScreenshot(1), 1000);
   } catch(e) { _bwStatus('Error: ' + e.message); }
 }
 
