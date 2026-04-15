@@ -3860,23 +3860,27 @@ def get_daily_token_stats() -> dict:
 _metrics_cache: dict = {}
 _metrics_cache_lock = threading.Lock()
 _metrics_cache_ts: float = 0.0
+_metrics_refreshing = False
 _METRICS_TTL = 8.0  # seconds
 
 
 def _refresh_metrics_cache() -> None:
     """Build metrics in a background thread and store in cache."""
-    global _metrics_cache, _metrics_cache_ts
-    import gc
-    data = _build_system_metrics()
-    with _metrics_cache_lock:
-        _metrics_cache = data
-        _metrics_cache_ts = time.time()
-    gc.collect()  # reclaim memory from JSONL parsing
+    global _metrics_cache, _metrics_cache_ts, _metrics_refreshing
+    try:
+        import gc
+        data = _build_system_metrics()
+        with _metrics_cache_lock:
+            _metrics_cache = data
+            _metrics_cache_ts = time.time()
+        gc.collect()  # reclaim memory from JSONL parsing
+    finally:
+        _metrics_refreshing = False
 
 
 def get_system_metrics() -> dict:
     """Return cached metrics (stale-while-revalidate). First call blocks briefly."""
-    global _metrics_cache, _metrics_cache_ts
+    global _metrics_cache, _metrics_cache_ts, _metrics_refreshing
     now = time.time()
     with _metrics_cache_lock:
         cache_age = now - _metrics_cache_ts
@@ -3890,8 +3894,9 @@ def get_system_metrics() -> dict:
             _metrics_cache_ts = time.time()
         return data
 
-    # Trigger background refresh if stale
-    if cache_age > _METRICS_TTL:
+    # Trigger background refresh if stale (but only one at a time)
+    if cache_age > _METRICS_TTL and not _metrics_refreshing:
+        _metrics_refreshing = True
         t = threading.Thread(target=_refresh_metrics_cache, daemon=True)
         t.start()
 
