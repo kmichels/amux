@@ -220,13 +220,19 @@ _proc_info_last_update: float = 0.0
 _PROC_INFO_TTL = 10.0  # refresh every 10s
 
 def _build_proc_info() -> dict:
-    """Gather process-level diagnostics (may block ~100ms for CPU sampling)."""
+    """Gather process-level diagnostics (blocks ~500ms for CPU sampling)."""
     info = {}
     try:
+        # Longer sample window + actual elapsed time divisor: a 100ms window was
+        # small enough that any brief multi-thread burst inflated the reading to
+        # 150-200%, triggering false watchdog alerts.
         t1 = os.times()
-        time.sleep(0.1)
+        w1 = time.monotonic()
+        time.sleep(0.5)
         t2 = os.times()
-        info["cpu_percent"] = round(((t2.user - t1.user) + (t2.system - t1.system)) / 0.1 * 100, 1)
+        elapsed = max(time.monotonic() - w1, 0.001)
+        cpu_seconds = (t2.user - t1.user) + (t2.system - t1.system)
+        info["cpu_percent"] = round(cpu_seconds / elapsed * 100, 1)
     except Exception:
         pass
     try:
