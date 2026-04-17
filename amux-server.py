@@ -15906,7 +15906,12 @@ function _chipAction(chip, sessionName, isPeek) {
       const inp = document.getElementById('peek-cmd-input');
       if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); slashAcUpdate(); }
     } else {
-      chipToInput(sessionName, chip.value);
+      // Try card input first, then workspace pane input
+      const cardInp = document.getElementById('input-' + sessionName);
+      const gpInp = document.getElementById(_gpSafeId(sessionName) + '-input');
+      const inp = cardInp || gpInp;
+      if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); }
+      if (cardInp) cardSlashAcUpdate(sessionName);
     }
   } else if (chip.action === 'special') {
     if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
@@ -16534,6 +16539,12 @@ function refreshAllChipBars() {
   document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
     const name = el.id.replace('card-chips-', '');
     if (name) renderChips(el, name, false);
+  });
+  // Refresh workspace grid pane chip bars
+  Object.keys(_gridPanes).forEach(name => {
+    const sid = _gpSafeId(name);
+    const el = document.getElementById(sid + '-chips');
+    if (el) renderChips(el, name, false);
   });
 }
 // Initialize peek chip bar now that renderChips is defined
@@ -21929,19 +21940,7 @@ function addGridPane(name, x, y, w, h) {
     '</div>' +
     '<div class="gp-body overlay-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
-      '<div class="chips">' +
-        '<div class="chip" onclick="doSend(\'' + safeName + '\',\'continue\')">continue</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Enter\')">Enter</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Up\')">&#x2191;</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Down\')">&#x2193;</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/status\')">/status</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/model\')">/model</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/mcp\')">/mcp</div>' +
-        '<div class="chip danger" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl+C</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-o\')">Ctrl+O</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
-      '</div>' +
+      '<div class="chips" id="' + sid + '-chips"></div>' +
       '<div class="send-row">' +
         '<textarea class="send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
           ' oninput="autoGrow(this);cmdHistoryReset()"' +
@@ -21966,6 +21965,8 @@ function addGridPane(name, x, y, w, h) {
       }
     }, {passive: true});
   }
+  const gpChips = document.getElementById(sid + '-chips');
+  if (gpChips) renderChips(gpChips, name, false);
   _updateGridPane(name);
   _renderGridChips();
   _gridSaveLayout();
