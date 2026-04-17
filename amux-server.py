@@ -6984,6 +6984,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay-body .md-link { color: var(--yellow); text-decoration: none; border-bottom: 1px dashed var(--yellow); cursor: pointer; }
   .overlay-body .md-link:active { color: #e8c547; }
   .overlay-status { color: var(--dim); font-size: 0.75rem; margin-top: 6px; flex-shrink: 0; text-align: center; }
+  .scroll-lock-badge {
+    position: sticky; bottom: 0; left: 0; right: 0;
+    text-align: center; padding: 6px 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85) 40%);
+    color: var(--accent); font-size: 0.75rem; cursor: pointer;
+    z-index: 5; pointer-events: auto;
+  }
+  body.light .scroll-lock-badge { background: linear-gradient(transparent, rgba(255,255,255,0.9) 40%); }
 
   /* File preview overlay */
   .file-overlay {
@@ -14777,6 +14785,7 @@ function openPeek(name, opts) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
+  _peekScrollLocked = false;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   // Reset to terminal tab
   _peekGitData = null;
@@ -15157,10 +15166,32 @@ function linkifyOutput(text) {
 }
 
 let peekSelecting = false;
+let _peekScrollLocked = false;
+
+function _isScrolledToBottom(el, threshold) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 40);
+}
+
+function _showScrollLockBadge(scrollEl, onClickResume) {
+  let badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.className = 'scroll-lock-badge';
+    badge.textContent = 'Scrolled up \u2014 click to resume';
+    badge.onclick = (e) => { e.stopPropagation(); onClickResume(); };
+    scrollEl.appendChild(badge);
+  }
+  badge.style.display = '';
+}
+
+function _hideScrollLockBadge(scrollEl) {
+  const badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (badge) badge.style.display = 'none';
+}
+
 async function refreshPeek() {
   const name = peekSession;
   if (!name) return;
-  // Skip refresh while user is selecting text
   if (peekSelecting) return;
   const sel = window.getSelection();
   if (sel && sel.toString().length > 0) return;
@@ -15169,28 +15200,25 @@ async function refreshPeek() {
   try {
     const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=500');
     const data = await r.json();
-    // Session changed while fetch was in flight — discard stale response
     if (peekSession !== name) return;
     const output = data.output || '(no output)';
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    // Anchor on distance-from-bottom, not scrollTop. Peek returns the
-    // tail of the buffer, so when new lines append, old lines roll off
-    // the top — every visible line shifts up by N. Preserving scrollTop
-    // would slide the user's reading position; preserving distance from
-    // the bottom keeps the same content under their eye.
-    const distFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight;
+    const atBottom = _isScrolledToBottom(body);
+    if (atBottom) _peekScrollLocked = false;
     const newHTML = linkifyOutput(stripAnsi(output));
-    // Re-check: user may have started selecting text during the async fetch
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
-    // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
-    applyPeekSearch(hasSearch);  // keepIndex=true when search is active
-    if (atBottom && !hasSearch) {
+    applyPeekSearch(hasSearch);
+    if (!_peekScrollLocked && atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
-    } else {
-      body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight - distFromBottom);
+      _hideScrollLockBadge(body);
+    } else if (_peekScrollLocked) {
+      _showScrollLockBadge(body, () => {
+        _peekScrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
     }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
@@ -18691,6 +18719,14 @@ function peekCheckSelection() {
 }
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
+document.getElementById('peek-body').addEventListener('scroll', function() {
+  if (_isScrolledToBottom(this)) {
+    _peekScrollLocked = false;
+    _hideScrollLockBadge(this);
+  } else {
+    _peekScrollLocked = true;
+  }
+}, {passive: true});
 // Force URLs in peek output to open in the system browser (PWA desktop + mobile).
 // Handle both click (desktop) and touchend (iOS/Android) for reliability.
 function _peekOpenLink(e) {
@@ -21921,6 +21957,14 @@ function addGridPane(name, x, y, w, h) {
   if (gpBody) {
     gpBody.addEventListener('click', _peekOpenLink);
     gpBody.addEventListener('touchend', _peekOpenLink, {passive: false});
+    gpBody.addEventListener('scroll', function() {
+      if (_isScrolledToBottom(this)) {
+        this._scrollLocked = false;
+        _hideScrollLockBadge(this);
+      } else {
+        this._scrollLocked = true;
+      }
+    }, {passive: true});
   }
   _updateGridPane(name);
   _renderGridChips();
@@ -21944,9 +21988,19 @@ async function _updateGridPane(name) {
   if (!body) { removeGridPane(name); return; }
   try {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    const atBottom = _isScrolledToBottom(body);
+    const locked = body._scrollLocked;
     body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
-    if (atBottom) body.scrollTop = body.scrollHeight;
+    if (!locked && atBottom) {
+      body.scrollTop = body.scrollHeight;
+      _hideScrollLockBadge(body);
+    } else if (locked) {
+      _showScrollLockBadge(body, () => {
+        body._scrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
+    }
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
       dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
@@ -22111,10 +22165,15 @@ function _wsClosePresetMenu(e) {
 function wsApplyPreset(preset) {
   document.getElementById('ws-preset-menu')?.classList.remove('open');
   if (!_grid) return;
-  // Get active session pane names (or all sessions if none open)
   let names = Object.keys(_gridPanes);
   if (!names.length) {
-    names = (sessions || []).map(s => s.name);
+    if (preset === 'auto') {
+      // Auto: prefer running/active sessions, fall back to all
+      const running = (sessions || []).filter(s => s.running || s.status === 'active' || s.status === 'waiting');
+      names = running.length ? running.map(s => s.name) : (sessions || []).map(s => s.name);
+    } else {
+      names = (sessions || []).map(s => s.name);
+    }
   }
   if (!names.length) return;
 
@@ -22139,6 +22198,16 @@ function wsApplyPreset(preset) {
 function _wsCalcPreset(preset, count) {
   const items = [];
   switch (preset) {
+    case 'auto': {
+      const wide = window.innerWidth >= 1200;
+      const mid = window.innerWidth >= 800;
+      if (count === 1) return _wsCalcPreset('focus', count);
+      if (count === 2) return _wsCalcPreset(wide ? 'split' : 'focus', count);
+      if (count === 3) return _wsCalcPreset(wide ? 'tri' : mid ? 'main-side' : 'focus', count);
+      if (count <= 4) return _wsCalcPreset(wide ? 'grid-2x2' : mid ? 'split' : 'focus', count);
+      if (count <= 6) return _wsCalcPreset(wide ? 'tri' : 'split', count);
+      return _wsCalcPreset(wide ? 'tri' : 'split', count);
+    }
     case 'focus':
       // Single column, all stacked full-width
       for (let i = 0; i < count; i++)
@@ -28154,6 +28223,7 @@ async function _jrnlSaveConfig() {
     <div class="ws-preset-dropdown" id="ws-preset-dropdown">
       <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
       <div class="ws-preset-menu" id="ws-preset-menu">
+        <button onclick="wsApplyPreset('auto')"><span class="preset-icon">&#x2728;</span> Auto</button>
         <button onclick="wsApplyPreset('focus')"><span class="preset-icon">&#x25A0;</span> Focus (1 col)</button>
         <button onclick="wsApplyPreset('split')"><span class="preset-icon">&#x25EB;</span> Split (2 col)</button>
         <button onclick="wsApplyPreset('tri')"><span class="preset-icon">&#x2630;</span> 3 Columns</button>
