@@ -10984,11 +10984,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="peek-status" class="overlay-status"></div>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
-      <div id="peek-steer-bar" style="display:none;padding:6px 12px;background:rgba(210,153,34,0.1);border-bottom:1px solid var(--border);font-size:0.78rem;gap:8px;align-items:center;">
-        <span style="color:var(--yellow);font-weight:600;">&#x1F4E8; Steering queued:</span>
-        <span id="peek-steer-text" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
-        <button class="btn" style="font-size:0.65rem;padding:2px 6px;" onclick="clearSteering()">Cancel</button>
-      </div>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
         <div class="voice-status" id="voice-status"><span id="voice-status-text"></span></div>
         <div class="chips" style="width:100%;margin:0;" id="peek-chips"></div>
@@ -12474,14 +12469,8 @@ function render() {
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
   updatePeekStatus();
   if (peekSession) {
-    const ps = (sessions || []).find(s => s.name === peekSession);
-    const bar = document.getElementById('peek-steer-bar');
-    if (bar && ps) {
-      const q = ps.steering || [];
-      if (q.length) { bar.style.display = 'flex'; document.getElementById('peek-steer-text').textContent = q.map(m => m.text).join(' → '); }
-      else { bar.style.display = 'none'; }
-    }
-    if (_peekTab === 'steering') { _steeringRender(); _steeringUpdateBadge(); }
+    _steeringUpdateBadge();
+    if (_peekTab === 'steering') _steeringRender();
   }
   const el = document.getElementById('cards');
   // Skip re-render while user has focus inside any card input/textarea — prevents cursor reset and value loss
@@ -14991,7 +14980,6 @@ function openPeek(name, opts) {
   if (draft) setTimeout(() => document.getElementById('peek-cmd-input').focus({ preventScroll: true }), 50);
   document.getElementById('peek-title').textContent = name;
   updatePeekStatus();
-  updateSteerBar(name);
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
   ['peek-tab-steering-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
@@ -15734,27 +15722,8 @@ async function steerSession(name, text) {
   });
   if (r) {
     showToast('Steering queued — will deliver at next turn boundary');
-    updateSteerBar(name);
+    _steeringUpdateBadge();
   }
-}
-async function clearSteering() {
-  if (!peekSession) return;
-  await apiCall(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', { method: 'DELETE' });
-  updateSteerBar(peekSession);
-}
-async function updateSteerBar(name) {
-  const bar = document.getElementById('peek-steer-bar');
-  if (!bar || name !== peekSession) return;
-  try {
-    const r = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/steer');
-    const queue = await r.json();
-    if (queue.length > 0) {
-      bar.style.display = 'flex';
-      document.getElementById('peek-steer-text').textContent = queue.map(m => m.text).join(' → ');
-    } else {
-      bar.style.display = 'none';
-    }
-  } catch(e) { bar.style.display = 'none'; }
 }
 function peekDownloadLog() {
   if (!peekSession) return;
@@ -22984,7 +22953,7 @@ function connectSSE() {
       } else if (msg.type === 'alerts') {
         for (const a of (msg.payload || [])) {
           _fireAmuxAlert(a);
-          if (a.type === 'steering_delivered' && a.session === peekSession) updateSteerBar(peekSession);
+          if (a.type === 'steering_delivered' && a.session === peekSession) _steeringUpdateBadge();
         }
       } else if (msg.type === 'invalidate') {
         for (const key of (msg.keys || [])) {
