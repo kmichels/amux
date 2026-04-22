@@ -12448,7 +12448,7 @@ function updatePeekStatus() {
   const cmdInp = document.getElementById('peek-cmd-input');
   if (cmdInp) {
     cmdInp.placeholder = s.status === 'active'
-      ? 'Steer at next turn boundary...'
+      ? 'Type a message (session is working)...'
       : 'Type a message or drop a file...';
   }
   // Model badge
@@ -15541,15 +15541,21 @@ async function sendPeekCmd() {
   const text = inp.value.trim();
   const files = peekFiles.filter(f => f.path); // only successfully uploaded
   if (!text && files.length === 0) return;
-  // If session is actively working, queue as steering instead of interrupting
+  // If session is actively working, ask whether to queue or send now
   const sess = (sessions || []).find(s => s.name === peekSession);
   if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
-    cmdHistoryAdd(text);
-    inp.value = '';
-    inp.style.height = 'auto';
-    delete _peekDrafts[peekSession];
-    await steerSession(peekSession, text);
-    return;
+    const choice = await _showSteerPrompt(text);
+    if (choice === 'queue') {
+      cmdHistoryAdd(text);
+      inp.value = '';
+      inp.style.height = 'auto';
+      delete _peekDrafts[peekSession];
+      await steerSession(peekSession, text);
+      return;
+    } else if (choice === 'cancel') {
+      return;
+    }
+    // choice === 'send' — fall through to normal send
   }
   cmdHistoryAdd(text);
 
@@ -15594,6 +15600,29 @@ async function peekQuickKeys(keys) {
   setTimeout(refreshPeek, 500);
 }
 
+function _showSteerPrompt(text) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div');
+    bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:400;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:400px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.4);';
+    box.innerHTML = `<div style="font-weight:600;margin-bottom:8px;">Session is working</div>
+      <div style="font-size:0.85rem;color:var(--dim);margin-bottom:12px;">This session is actively running. How should your message be delivered?</div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-bottom:16px;max-height:60px;overflow:hidden;word-break:break-word;">${text.length > 120 ? text.slice(0,120) + '…' : text}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" id="steer-cancel" style="font-size:0.82rem;">Cancel</button>
+        <button class="btn" id="steer-send-now" style="font-size:0.82rem;">Send now</button>
+        <button class="btn primary" id="steer-queue" style="font-size:0.82rem;">Queue for next turn</button>
+      </div>`;
+    bg.appendChild(box);
+    document.body.appendChild(bg);
+    const cleanup = (val) => { bg.remove(); resolve(val); };
+    box.querySelector('#steer-cancel').onclick = () => cleanup('cancel');
+    box.querySelector('#steer-send-now').onclick = () => cleanup('send');
+    box.querySelector('#steer-queue').onclick = () => cleanup('queue');
+    bg.onclick = (e) => { if (e.target === bg) cleanup('cancel'); };
+  });
+}
 async function steerSession(name, text) {
   if (!text) return;
   const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/steer', {
