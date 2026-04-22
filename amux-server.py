@@ -12598,7 +12598,6 @@ function render() {
           ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
           ${s.status === 'waiting' ? '<span class="status-badge waiting">needs input</span>' : ''}
           ${s.status === 'idle' ? '<span class="status-badge idle">idle</span>' : ''}
-          ${s.steering && s.steering.length ? '<span class="status-badge" style="background:rgba(210,153,34,0.2);color:var(--yellow);">&#x1F4E8; steering (' + s.steering.length + ')</span>' : ''}
           ${s.tokens ? `<span class="token-count">${fmtTokens(s.tokens)}</span>` : ''}
           ${s.last_activity ? `<span class="last-active">${timeAgo(s.last_activity)}</span>` : ''}
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
@@ -12609,7 +12608,6 @@ function render() {
       ${s.dir ? _renderBranchBadge(s.name, s.branch) : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
-      ${s.steering && s.steering.length ? `<div style="font-size:0.75rem;color:var(--yellow);padding:4px 0;display:flex;align-items:start;gap:4px;"><span style="flex-shrink:0;">&#x1F4E8;</span><span style="opacity:0.85;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${s.steering.map(m => esc(m.text)).join(' → ')}</span></div>` : ''}
       ${isExp && s.preview ? `<div class="card-preview">${esc(s.preview)}</div>` : ''}
       ${logSearchMode && _logMatches[s.name] ? (() => {
         const hits = _logMatches[s.name];
@@ -13871,7 +13869,10 @@ function _steeringRender() {
         <div style="font-size:0.85rem;color:var(--fg);white-space:pre-wrap;word-break:break-word;">${esc(m.text)}</div>
         <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">Queued ${ago}</div>
       </div>
-      <button class="btn" style="font-size:0.7rem;padding:2px 8px;flex-shrink:0;" onclick="_steeringCancel('${m.id}')">✕</button>
+      <div style="display:flex;gap:4px;flex-shrink:0;">
+        <button class="btn primary" style="font-size:0.7rem;padding:2px 8px;" onclick="_steeringSendNow('${m.id}')">Send now</button>
+        <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="_steeringCancel('${m.id}')">✕</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -13881,6 +13882,27 @@ function _steeringUpdateBadge() {
   const queue = (sess && sess.steering) || [];
   const badge = document.getElementById('peek-tab-steering-count');
   if (badge) badge.textContent = queue.length ? ' (' + queue.length + ')' : '';
+}
+
+async function _steeringSendNow(msgId) {
+  if (!peekSession) return;
+  const sess = sessions.find(s => s.name === peekSession);
+  const msg = ((sess && sess.steering) || []).find(m => m.id === msgId);
+  if (!msg) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', {
+      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: msgId})
+    });
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/send', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: msg.text})
+    });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+    showToast('Sent to ' + peekSession);
+  } catch(e) { showToast('Failed to send'); }
 }
 
 async function _steeringCancel(msgId) {
