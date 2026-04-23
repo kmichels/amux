@@ -857,6 +857,8 @@ _session_locks: dict = {}           # per-session RLocks for stop/start serializ
 _session_locks_init = threading.Lock()  # protects _session_locks dict itself
 
 _VALID_CC_SESSION_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.\-]*$')
+_stop_pool = __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(max_workers=4)
+_USER_SHELL = os.environ.get("SHELL", "/bin/bash")
 _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
 
 
@@ -4786,6 +4788,10 @@ def _evict_stale_caches():
         stale_locks = [k for k in _send_locks if k not in live_sessions]
         for k in stale_locks:
             _send_locks.pop(k, None)
+    with _session_locks_init:
+        stale_slocks = [k for k in _session_locks if k not in live_sessions]
+        for k in stale_slocks:
+            _session_locks.pop(k, None)
 
 
 def _cleanup_session_state(name: str):
@@ -4796,6 +4802,8 @@ def _cleanup_session_state(name: str):
     _session_prev_status.pop(name, None)
     with _send_locks_lock:
         _send_locks.pop(name, None)
+    with _session_locks_init:
+        _session_locks.pop(name, None)
 
 
 def _init_default_sessions():
@@ -5303,7 +5311,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                     output2 = tmux_capture(name, 10)
                     if not _at_shell_prompt(output2):
                         # Still not at prompt -- respawn pane
-                        subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), "bash"],
+                        subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                                        capture_output=True, timeout=5)
                         time.sleep(1)
                         # Source profile in the new pane
@@ -5340,7 +5348,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
                      "-e", "AMUX_SESSION=" + name,
                      "-e", ("AMUX_URL=http" if "--no-tls" in sys.argv else "AMUX_URL=https") + "://localhost:8822",
                      *_env_args,
-                     "bash"],
+                     _USER_SHELL],
                     check=True, capture_output=True, timeout=10,
                 )
                 # Set remain-on-exit so pane survives if bash crashes
@@ -5530,7 +5538,7 @@ def _hard_kill_claude(name: str):
     else:
         # Can't find Claude PID -- respawn pane to get a clean shell (keep tmux alive)
         try:
-            subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), "bash"],
+            subprocess.run(["tmux", "respawn-pane", "-k", "-t", tmux_target(name), _USER_SHELL],
                            capture_output=True, timeout=5)
         except Exception:
             pass
@@ -33546,7 +33554,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                             _complete_session_board_issue(sname)
                     except Exception as e:
                         print(f"[stop] {sname}: background stop error: {e}")
-                threading.Thread(target=_bg_stop, daemon=True).start()
+                _stop_pool.submit(_bg_stop)
                 return self._json({"ok": True, "message": "stopping"}, 202)
             if action == "clear":
                 try:
