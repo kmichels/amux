@@ -32,7 +32,7 @@ COMPOSE_TPL   = os.path.join(os.path.dirname(__file__), "../docker/docker-compos
 LITESTREAM_YML= os.path.join(os.path.dirname(__file__), "../litestream/litestream.yml")
 DATA_DIR      = os.environ.get("AMUX_CLOUD_DATA", "/var/amux/users")
 DB_PATH       = os.environ.get("GATEWAY_DB", "/var/amux/gateway.db")
-IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "3600"))
+IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "259200"))  # 3 days
 PORT_BASE     = 9000
 COOKIE_MAX_AGE = 86400 * 7  # 7 days
 # Signup is open — no passcode required
@@ -996,35 +996,37 @@ def _clerk_get_email(user_id):
 # ── Idle reaper ────────────────────────────────────────────────────────────────
 def _reaper():
     while True:
-        time.sleep(60)
+        time.sleep(300)  # check every 5 minutes
         try:
             db = get_db()
             cutoff = int(time.time()) - IDLE_SECONDS
-            # Exempt org members (they use owner's container) and org owners
-            # whose members are still active — member activity keeps the
+            # Find org owners whose members are still active — keep the
             # shared container alive even when the owner hasn't visited.
-            org_member_ids = {r["member_id"] for r in
-                db.execute("SELECT member_id FROM org_members").fetchall()}
-            active_owner_ids = {r["owner_id"] for r in
-                db.execute(
-                    "SELECT DISTINCT m.owner_id FROM org_members m "
-                    "JOIN users u ON m.member_id = u.id WHERE u.last_seen >= ?",
-                    (cutoff,)).fetchall()}
+            active_owner_ids = set()
+            try:
+                active_owner_ids = {r["owner_id"] for r in
+                    db.execute(
+                        "SELECT DISTINCT o.owner_id FROM org_memberships m "
+                        "JOIN orgs o ON o.id = m.org_id "
+                        "JOIN users u ON m.user_id = u.id "
+                        "WHERE u.last_seen >= ? AND o.owner_id != m.user_id",
+                        (cutoff,)).fetchall()}
+            except Exception:
+                pass
             stale = db.execute(
-                "SELECT id FROM users WHERE last_seen < ? AND plan = 'free'",
+                "SELECT id FROM users WHERE last_seen < ?",
                 (cutoff,)).fetchall()
             for row in stale:
                 uid = row["id"]
-                if uid in org_member_ids or uid in active_owner_ids:
+                if uid in active_owner_ids:
                     continue
                 if container_running(uid):
-                    print(f"[reaper] stopping idle container for {uid}")
+                    print(f"[reaper] stopping idle container for {uid} (last_seen before cutoff)", flush=True)
                     stop_container(uid)
         except Exception as e:
-            print(f"[reaper] error: {e}")
+            print(f"[reaper] error: {e}", flush=True)
 
-# Reaper disabled — not needed with current user count
-# threading.Thread(target=_reaper, daemon=True).start()
+threading.Thread(target=_reaper, daemon=True).start()
 
 # ── Share token resolver (caches token→port for 60s) ──────────────────────────
 _share_cache = {}  # token → (port, expiry_time)

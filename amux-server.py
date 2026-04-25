@@ -21,7 +21,7 @@ import time
 import uuid
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Strip Claude Code env vars so child processes (new sessions) don't inherit them
 for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
@@ -220,13 +220,19 @@ _proc_info_last_update: float = 0.0
 _PROC_INFO_TTL = 10.0  # refresh every 10s
 
 def _build_proc_info() -> dict:
-    """Gather process-level diagnostics (may block ~100ms for CPU sampling)."""
+    """Gather process-level diagnostics (blocks ~500ms for CPU sampling)."""
     info = {}
     try:
+        # Longer sample window + actual elapsed time divisor: a 100ms window was
+        # small enough that any brief multi-thread burst inflated the reading to
+        # 150-200%, triggering false watchdog alerts.
         t1 = os.times()
-        time.sleep(0.1)
+        w1 = time.monotonic()
+        time.sleep(0.5)
         t2 = os.times()
-        info["cpu_percent"] = round(((t2.user - t1.user) + (t2.system - t1.system)) / 0.1 * 100, 1)
+        elapsed = max(time.monotonic() - w1, 0.001)
+        cpu_seconds = (t2.user - t1.user) + (t2.system - t1.system)
+        info["cpu_percent"] = round(cpu_seconds / elapsed * 100, 1)
     except Exception:
         pass
     try:
@@ -444,17 +450,23 @@ def _bu_list_profiles() -> list:
     except Exception:
         return []
 
-def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
-    """Take a screenshot, return {path, size}."""
+def _bu_screenshot(session: str = "amux", path: str = "", retries: int = 3) -> dict:
+    """Take a screenshot, return {path, size}. Retries on SessionManager errors."""
     dest = path or str(Path.home() / ".amux" / "browser-screenshots" / "latest.jpg")
     Path(dest).parent.mkdir(parents=True, exist_ok=True)
-    result = _bu_call(["screenshot", dest], session=session)
-    if result.get("success"):
-        try:
-            size = Path(dest).stat().st_size
-        except Exception:
-            size = 0
-        return {"path": dest, "size": size}
+    for attempt in range(retries):
+        result = _bu_call(["screenshot", dest], session=session)
+        if result.get("success"):
+            try:
+                size = Path(dest).stat().st_size
+            except Exception:
+                size = 0
+            return {"path": dest, "size": size}
+        err = result.get("error", "")
+        if "SessionManager" in err and attempt < retries - 1:
+            import time as _t; _t.sleep(1.5)
+            continue
+        return result
     return result
 
 def _bu_agent_run(task: str, session: str = "amux-agent", profile: str = "",
@@ -815,6 +827,8 @@ def _classify_request(method: str, path: str) -> tuple:
         if method == "POST"  and sub == "start":   return ("session", "started",      sname, sname)
         if method == "POST"  and sub == "stop":    return ("session", "stopped",      sname, sname)
         if method == "POST"  and sub == "send":    return ("session", "message-sent", sname, sname)
+        if method == "POST"  and sub == "steer":   return ("session", "steered",      sname, sname)
+        if method == "DELETE"and sub == "steer":   return ("session", "steer-cleared",sname, sname)
         if method == "POST"  and sub == "archive": return ("session", "archived",     sname, sname)
         if method == "POST"  and sub == "wake":    return ("session", "woken",        sname, sname)
         if method == "PATCH" and sub == "config":  return ("session", "configured",   sname, sname)
@@ -860,6 +874,8 @@ _VALID_CC_SESSION_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.\-]*$')
 _stop_pool = __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(max_workers=4)
 _USER_SHELL = os.environ.get("SHELL", "/bin/bash")
 _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
+_steering_queue: dict = {}      # {session_name: [{"text": str, "queued_at": float, "id": str}]}
+_steering_lock = threading.Lock()
 
 
 def _get_session_lock(name: str) -> threading.RLock:
@@ -1737,6 +1753,21 @@ def _snapshot_all_sessions():
             else:
                 # Session no longer waiting — reset tracking
                 actions.pop("ac_waiting_since", None)
+
+            # ── 5. Steering: deliver queued messages at turn boundary ────────
+            if status == "waiting":
+                with _steering_lock:
+                    queue = _steering_queue.get(name, [])
+                if queue:
+                    msg = queue[0]
+                    ok, err = send_text(name, msg["text"])
+                    if ok:
+                        with _steering_lock:
+                            q = _steering_queue.get(name, [])
+                            _steering_queue[name] = [m for m in q if m["id"] != msg["id"]]
+                        _push_alert("steering_delivered", name,
+                                    f"Steering message delivered to '{name}'")
+
         except Exception:
             pass
 
@@ -2557,6 +2588,93 @@ def _sync_skills_to_commands():
                 pass
     except Exception:
         pass
+
+
+_BUILTIN_SLASH_COMMANDS = [
+    ("/add-dir", "Add a working directory"),
+    ("/agents", "Manage agent configurations"),
+    ("/batch", "Orchestrate large-scale changes in parallel"),
+    ("/clear", "Clear conversation history"),
+    ("/color", "Set prompt bar color"),
+    ("/compact", "Compact conversation history"),
+    ("/config", "Open config panel"),
+    ("/context", "Visualize context usage"),
+    ("/copy", "Copy last response to clipboard"),
+    ("/cost", "Show token usage and cost"),
+    ("/debug", "Enable debug logging"),
+    ("/diff", "Interactive diff viewer"),
+    ("/doctor", "Check installation health"),
+    ("/effort", "Set model effort level"),
+    ("/export", "Export conversation as text"),
+    ("/extra-usage", "Configure extra usage for rate limits"),
+    ("/fast", "Toggle fast mode"),
+    ("/feedback", "Submit feedback or report a bug"),
+    ("/focus", "Toggle focus view"),
+    ("/help", "Show available commands"),
+    ("/hooks", "View hook configurations"),
+    ("/ide", "Manage IDE integrations"),
+    ("/init", "Initialize project CLAUDE.md"),
+    ("/login", "Switch account or log in"),
+    ("/logout", "Log out of current account"),
+    ("/loop", "Run a prompt repeatedly"),
+    ("/mcp", "Manage MCP servers"),
+    ("/memory", "Edit CLAUDE.md memory"),
+    ("/model", "Switch model"),
+    ("/permissions", "View/manage permissions"),
+    ("/plan", "Enter plan mode"),
+    ("/plugin", "Manage plugins"),
+    ("/recap", "Summarize current session"),
+    ("/release-notes", "View changelog"),
+    ("/remote-control", "Enable remote control from claude.ai"),
+    ("/rename", "Rename current session"),
+    ("/resume", "Resume a conversation"),
+    ("/review", "Review a pull request"),
+    ("/rewind", "Rewind conversation to a checkpoint"),
+    ("/sandbox", "Toggle sandbox mode"),
+    ("/schedule", "Create or manage routines"),
+    ("/security-review", "Analyze changes for security issues"),
+    ("/simplify", "Review code for reuse and quality"),
+    ("/skills", "List available skills"),
+    ("/stats", "Visualize usage and session history"),
+    ("/status", "Show session status"),
+    ("/statusline", "Configure status line"),
+    ("/tasks", "List and manage background tasks"),
+    ("/terminal-setup", "Set up terminal integration"),
+    ("/theme", "Change color theme"),
+    ("/ultraplan", "Draft a plan with cloud review"),
+    ("/ultrareview", "Deep multi-agent code review"),
+    ("/usage", "Show plan usage and rate limits"),
+    ("/vim", "Edit prompt in Vim"),
+    ("/voice", "Toggle voice dictation"),
+]
+
+
+def _get_slash_commands():
+    import pathlib as _p
+    cmds = [{"cmd": c, "desc": d} for c, d in _BUILTIN_SLASH_COMMANDS]
+    seen = {c for c, _ in _BUILTIN_SLASH_COMMANDS}
+    for d in [_p.Path.home() / ".claude" / "commands", _p.Path(".")  / ".claude" / "commands"]:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            name = "/" + f.stem
+            if name in seen:
+                continue
+            seen.add(name)
+            desc = ""
+            try:
+                text = f.read_text()
+                if text.startswith("---"):
+                    fm_end = text.find("---", 3)
+                    if fm_end > 0:
+                        for line in text[3:fm_end].splitlines():
+                            if line.startswith("description:"):
+                                desc = line.split(":", 1)[1].strip()
+                                break
+            except Exception:
+                pass
+            cmds.append({"cmd": name, "desc": desc})
+    return cmds
 
 
 def _init_db():
@@ -4451,6 +4569,7 @@ def list_sessions() -> list:
             "pinned": cfg.get("CC_PINNED", "") == "1",
             "archived": cfg.get("CC_ARCHIVED", "") == "1",
             "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
+            "steering": _steering_queue.get(name, []),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -4513,10 +4632,69 @@ def _find_latest_session_id(work_dir: str) -> str:
     return ""
 
 
+def _ascript_str(s: str) -> str:
+    """Convert a Python string to an AppleScript expression with proper linefeed handling.
+    Returns an expression like: ("line1" & linefeed & "line2")
+    Handles quotes, backslashes, and newlines safely."""
+    lines = s.split("\n")
+    escaped = []
+    for line in lines:
+        escaped.append('"' + line.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    if len(escaped) == 1:
+        return escaped[0]
+    return "(" + " & linefeed & ".join(escaped) + ")"
+
+
 def _project_name(work_dir: str) -> str:
     """Return the Claude project folder name for a given work dir (mirrors Claude's own encoding)."""
     resolved = str(Path(work_dir).expanduser().resolve())
     return resolved.replace("/", "-")
+
+
+def _live_conv_id(name: str, work_dir: str = "") -> str:
+    """Return the conversation id of the running claude process for a session.
+
+    Sources, in order of authority:
+      1. Argv of the running claude process — definitive when --session-id or
+         --resume is set (i.e. when start_session launched it).
+      2. Most-recently-modified jsonl in the work_dir's project folder.
+         Unreliable when multiple amux sessions share a work_dir, but the only
+         option for sessions started via the bash CLI (which doesn't set the
+         flag — Claude generates the id internally and doesn't expose it).
+    Empty string if nothing can be determined.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "list-panes", "-t", tmux_target(name), "-F", "#{pane_pid}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pane_pid = r.stdout.strip().split("\n")[0] if r.returncode == 0 else ""
+        if pane_pid:
+            r2 = subprocess.run(["pgrep", "-P", pane_pid], capture_output=True, text=True, timeout=5)
+            for pid in r2.stdout.strip().split("\n"):
+                if not pid:
+                    continue
+                r3 = subprocess.run(
+                    ["ps", "-o", "command=", "-p", pid],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cmd = r3.stdout.strip()
+                if "claude" not in cmd:
+                    continue
+                parts = shlex.split(cmd) if cmd else []
+                for flag in ("--resume", "--session-id"):
+                    if flag in parts:
+                        idx = parts.index(flag)
+                        if idx + 1 < len(parts):
+                            return parts[idx + 1]
+    except Exception:
+        pass
+    if work_dir:
+        try:
+            return _find_latest_session_id(work_dir)
+        except Exception:
+            return ""
+    return ""
 
 
 _GLOBAL_MEM_FILE = CC_MEMORY / "_global.md"
@@ -7159,11 +7337,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .chip.chip-edit-toggle { background: none; border: 1px solid transparent; color: var(--dim); padding: 6px 8px; font-size: 0.85rem; }
   .chip.chip-edit-toggle:hover { color: var(--accent); }
   .chip.chip-edit-toggle.active { color: var(--accent); }
-  .chips.editing .chip { cursor: grab; }
-  .chips.editing .chip.dragging { opacity: 0.4; }
-  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 4px; font-size: 0.7rem; opacity: 0.6; cursor: pointer; }
-  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); }
+  .chips.editing { flex-wrap: wrap; overflow-x: visible; touch-action: none; gap: 8px; }
+  .chips.editing .chip { cursor: grab; padding: 8px 12px; min-height: 40px; }
+  .chips.editing .chip.dragging { opacity: 0.3; }
+  .chips.editing .chip.drag-over { box-shadow: -3px 0 0 var(--accent); }
+  .chips.editing .chip-drag-handle { margin-right: 4px; opacity: 0.4; font-size: 0.7rem; }
+  .chips.editing .chip-remove-btn { display: inline-flex; margin-left: 6px; font-size: 0.8rem; opacity: 0.6; cursor: pointer; width: 22px; height: 22px; align-items: center; justify-content: center; border-radius: 50%; background: rgba(248,81,73,0.1); }
+  .chips.editing .chip-remove-btn:hover { opacity: 1; color: var(--red); background: rgba(248,81,73,0.2); }
   .chip-remove-btn { display: none; }
+  .chip-drag-handle { display: none; }
   .chip-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 2000; display: flex; align-items: center; justify-content: center; }
   .chip-picker { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 340px; max-height: 70vh; display: flex; flex-direction: column; overflow: hidden; }
   .chip-picker-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
@@ -7263,6 +7445,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .overlay-body .md-link { color: var(--yellow); text-decoration: none; border-bottom: 1px dashed var(--yellow); cursor: pointer; }
   .overlay-body .md-link:active { color: #e8c547; }
   .overlay-status { color: var(--dim); font-size: 0.75rem; margin-top: 6px; flex-shrink: 0; text-align: center; }
+  .scroll-lock-badge {
+    position: sticky; bottom: 0; left: 0; right: 0;
+    text-align: center; padding: 6px 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85) 40%);
+    color: var(--accent); font-size: 0.75rem; cursor: pointer;
+    z-index: 5; pointer-events: auto;
+  }
+  body.light .scroll-lock-badge { background: linear-gradient(transparent, rgba(255,255,255,0.9) 40%); }
 
   /* File preview overlay */
   .file-overlay {
@@ -10118,6 +10308,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <span class="theme-track"><span class="theme-thumb"></span></span>
             </label>
           </div>
+          <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:8px;">
+            <span style="font-size:0.85rem;">Zoom</span>
+            <div style="display:flex;align-items:center;gap:6px;">
+              <button class="btn" style="font-size:0.78rem;padding:2px 8px;min-width:28px;" onclick="zoomOut()">−</button>
+              <span id="zoom-level-display" style="font-size:0.82rem;font-weight:600;min-width:38px;text-align:center;">100%</span>
+              <button class="btn" style="font-size:0.78rem;padding:2px 8px;min-width:28px;" onclick="zoomIn()">+</button>
+              <button class="btn" style="font-size:0.65rem;padding:2px 6px;color:var(--dim);" onclick="resetZoom()">Reset</button>
+            </div>
+          </div>
+          <div style="font-size:0.68rem;color:var(--dim);margin-top:3px;">&#x2318;+/&#x2318;− or Ctrl+/Ctrl−</div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section" id="settings-apikeys-section">
@@ -11200,6 +11400,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- Tab bar -->
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
+    <button class="peek-tab" id="peek-tab-steering" onclick="setPeekTab('steering')">Steering<span class="peek-tab-count" id="peek-tab-steering-count"></span></button>
     <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-git" onclick="setPeekTab('git')">Worktree</button>
     <button class="peek-tab" id="peek-tab-commits" onclick="setPeekTab('commits')">Commits</button>
@@ -11257,6 +11458,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div id="psf-body" class="peek-split-files-body"></div>
   </div>
   </div><!-- /peek-split-wrap -->
+  <!-- Steering queue panel -->
+  <div id="peek-steering-panel" class="peek-tasks-panel">
+    <div class="peek-tasks-add" style="gap:10px;">
+      <span id="peek-steering-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+      <button class="btn" style="font-size:0.8rem;padding:5px 12px;" onclick="_steeringClearAll()">Clear all</button>
+    </div>
+    <div class="peek-tasks-list" id="peek-steering-list" style="gap:6px;"></div>
+  </div>
   <!-- Issues panel (board issues for this session) -->
   <div id="peek-issues-panel" class="peek-tasks-panel">
     <div class="peek-tasks-add" style="gap:10px;">
@@ -11750,9 +11959,13 @@ const _peekDrafts = {};  // session name → command text
 
 // ═══════ ZOOM ═══════
 const ZOOM_STEPS = [50, 60, 70, 75, 80, 85, 90, 95, 100, 110, 120, 130, 150, 175, 200];
-let _zoomLevel = 100;
+let _zoomLevel = parseInt(localStorage.getItem('amux_zoom')) || 100;
+if (!ZOOM_STEPS.includes(_zoomLevel)) _zoomLevel = 100;
 function _applyZoom() {
   document.documentElement.style.zoom = (_zoomLevel / 100);
+  localStorage.setItem('amux_zoom', _zoomLevel);
+  const el = document.getElementById('zoom-level-display');
+  if (el) el.textContent = _zoomLevel + '%';
 }
 function zoomIn() {
   var idx = ZOOM_STEPS.indexOf(_zoomLevel);
@@ -11765,6 +11978,7 @@ function zoomOut() {
   if (idx > 0) { _zoomLevel = ZOOM_STEPS[idx - 1]; _applyZoom(); }
 }
 function resetZoom() { _zoomLevel = 100; _applyZoom(); }
+if (_zoomLevel !== 100) _applyZoom();
 // Keyboard shortcuts: Cmd/Ctrl +/- for zoom
 document.addEventListener('keydown', function(e) {
   if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomIn(); }
@@ -12598,6 +12812,7 @@ const _ALERT_LABELS = {
   auto_restart:   (a) => ({ title: '🔄 Agent restarted', body: a.session + ' — ' + a.message }),
   thinking_reset: (a) => ({ title: '🔄 Thinking reset', body: a.session }),
   auto_continue:  (a) => ({ title: '▶ Agent continued', body: a.session }),
+  steering_delivered: (a) => ({ title: '📨 Steering delivered', body: a.session }),
 };
 
 function _fireAmuxAlert(a) {
@@ -12674,6 +12889,13 @@ function updatePeekStatus() {
   else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
   else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
   el.innerHTML = badge;
+  // Update input placeholder based on session state
+  const cmdInp = document.getElementById('peek-cmd-input');
+  if (cmdInp) {
+    cmdInp.placeholder = s.status === 'active'
+      ? 'Type a message (session is working)...'
+      : 'Type a message or drop a file...';
+  }
   // Model badge
   const mb = document.getElementById('peek-model-badge');
   if (mb) {
@@ -12687,6 +12909,10 @@ function render() {
   // Skip render if a menu or edit overlay is open to prevent DOM clobbering
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
   updatePeekStatus();
+  if (peekSession) {
+    _steeringUpdateBadge();
+    if (_peekTab === 'steering') _steeringRender();
+  }
   const el = document.getElementById('cards');
   // Skip re-render while user has focus inside any card input/textarea — prevents cursor reset and value loss
   const _active = document.activeElement;
@@ -13869,7 +14095,8 @@ async function doStop(name) {
 }
 
 async function copyMoshCmd(name) {
-  const cmd = `mosh --server=/opt/homebrew/bin/mosh-server konrad@bot-mini -- /opt/homebrew/bin/tmux attach-session -t amux-${name}`;
+  const host = location.hostname === 'localhost' ? 'localhost' : location.hostname;
+  const cmd = `mosh ${host} -- tmux attach-session -t amux-${name}`;
   try {
     await navigator.clipboard.writeText(cmd);
     showToast('Copied mosh command');
@@ -14038,12 +14265,17 @@ function setPeekTab(tab) {
     clearTimeout(_peekNotesSaveTimer); _peekNotesSaveTimer = null; _peekNotesSave();
   }
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
+  document.getElementById('peek-tab-steering').classList.toggle('active', tab === 'steering');
   document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-git').classList.toggle('active', tab === 'git');
   document.getElementById('peek-tab-commits').classList.toggle('active', tab === 'commits');
   document.getElementById('peek-tab-schedules').classList.toggle('active', tab === 'schedules');
   document.getElementById('peek-tab-notes').classList.toggle('active', tab === 'notes');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
+  document.getElementById('peek-split-wrap').style.display = tab === 'terminal' ? '' : 'none';
+  const steering = document.getElementById('peek-steering-panel');
+  if (tab === 'steering') { steering.classList.add('active'); _steeringRender(); }
+  else { steering.classList.remove('active'); }
   const issues = document.getElementById('peek-issues-panel');
   if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
   else { issues.classList.remove('active'); }
@@ -14059,6 +14291,86 @@ function setPeekTab(tab) {
   const notes = document.getElementById('peek-notes-panel');
   if (tab === 'notes') { notes.classList.add('active'); _peekNotesLoad(); }
   else { notes.classList.remove('active'); }
+}
+
+// ── Steering panel ──
+function _steeringRender() {
+  if (!peekSession) return;
+  const sess = sessions.find(s => s.name === peekSession);
+  const queue = (sess && sess.steering) || [];
+  const countEl = document.getElementById('peek-steering-count');
+  const list = document.getElementById('peek-steering-list');
+  countEl.textContent = queue.length ? queue.length + ' queued' : 'No queued messages';
+  if (!queue.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px 0;text-align:center;">No steering messages queued.<br>Send a message while the session is active to queue it.</div>';
+    return;
+  }
+  list.innerHTML = queue.map(m => {
+    const ago = timeAgo(m.queued_at);
+    return `<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:0.85rem;color:var(--fg);white-space:pre-wrap;word-break:break-word;">${esc(m.text)}</div>
+        <div style="font-size:0.75rem;color:var(--dim);margin-top:4px;">Queued ${ago}</div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0;">
+        <button class="btn primary" style="font-size:0.7rem;padding:2px 8px;" onclick="_steeringSendNow('${m.id}')">Send now</button>
+        <button class="btn" style="font-size:0.7rem;padding:2px 8px;" onclick="_steeringCancel('${m.id}')">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _steeringUpdateBadge() {
+  const sess = sessions.find(s => s.name === peekSession);
+  const queue = (sess && sess.steering) || [];
+  const badge = document.getElementById('peek-tab-steering-count');
+  if (!badge) return;
+  if (queue.length > 0) { badge.textContent = queue.length; badge.classList.add('has-count'); }
+  else { badge.textContent = ''; badge.classList.remove('has-count'); }
+}
+
+async function _steeringSendNow(msgId) {
+  if (!peekSession) return;
+  const sess = sessions.find(s => s.name === peekSession);
+  const msg = ((sess && sess.steering) || []).find(m => m.id === msgId);
+  if (!msg) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', {
+      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: msgId})
+    });
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/send', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: msg.text})
+    });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+    showToast('Sent to ' + peekSession);
+  } catch(e) { showToast('Failed to send'); }
+}
+
+async function _steeringCancel(msgId) {
+  if (!peekSession) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', {
+      method: 'DELETE', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: msgId})
+    });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+  } catch(e) { showToast('Failed to cancel message'); }
+}
+
+async function _steeringClearAll() {
+  if (!peekSession) return;
+  try {
+    await fetch(API + '/api/sessions/' + encodeURIComponent(peekSession) + '/steer', { method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: '{}' });
+    await fetchSessions();
+    _steeringRender();
+    _steeringUpdateBadge();
+  } catch(e) { showToast('Failed to clear queue'); }
 }
 
 // ── Commits panel ──
@@ -14503,6 +14815,11 @@ async function _peekUpdateTabCounts() {
     if (n > 0) { el.textContent = n; el.classList.add('has-count'); }
     else { el.textContent = ''; el.classList.remove('has-count'); }
   };
+  {
+    const s = sessions.find(s => s.name === sess);
+    const sq = (s && s.steering) || [];
+    setCount('peek-tab-steering-count', sq.length);
+  }
   try {
     const r = await fetch(API + '/api/schedules');
     if (peekSession !== sess) return;
@@ -15083,6 +15400,7 @@ function openPeek(name, opts) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
+  _peekScrollLocked = false;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   // Reset to terminal tab
   _peekGitData = null;
@@ -15090,7 +15408,9 @@ function openPeek(name, opts) {
   if (_gtp) _gtp.classList.remove('collapsed');
   if (_peekTab !== 'terminal') setPeekTab('terminal');
   document.getElementById('peek-terminal-panel').style.display = '';
+  document.getElementById('peek-split-wrap').style.display = '';
   document.getElementById('peek-memory-panel').classList.remove('active');
+  document.getElementById('peek-steering-panel').classList.remove('active');
   document.getElementById('peek-git-panel').classList.remove('active');
   document.getElementById('peek-commits-panel').classList.remove('active');
   document.getElementById('peek-schedules-panel').classList.remove('active');
@@ -15118,7 +15438,7 @@ function openPeek(name, opts) {
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   // Reset tab badges; will be repopulated by _peekUpdateTabCounts
-  ['peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
+  ['peek-tab-steering-count','peek-tab-schedules-count','peek-tab-notes-count'].forEach(id => {
     const el = document.getElementById(id);
     if (el) { el.textContent = ''; el.classList.remove('has-count'); }
   });
@@ -15183,6 +15503,8 @@ function closePeek() {
   ov.classList.remove('active', 'vv-compact', 'peek-focus');
   ov.style.height = '';
   ov.style.top = '';
+  ov.style.bottom = '';
+  ov.style.paddingBottom = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   sessionStorage.removeItem('peekState');
 }
@@ -15325,11 +15647,16 @@ function _syncPeekOverlayToVisualViewport() {
   const vv = window.visualViewport;
   const constrained = vv.height < window.innerHeight - 1 || vv.offsetTop > 1;
   if (constrained) {
-    ov.style.height = vv.height + 'px';
     ov.style.top = vv.offsetTop + 'px';
-  } else {
+    ov.style.bottom = '0px';
     ov.style.height = '';
+    const kbHeight = window.innerHeight - vv.offsetTop - vv.height;
+    ov.style.paddingBottom = Math.max(0, kbHeight) + 'px';
+  } else {
     ov.style.top = '';
+    ov.style.bottom = '';
+    ov.style.height = '';
+    ov.style.paddingBottom = '';
   }
   // Compact mode: hide chips, shrink padding when viewport is tight
   ov.classList.toggle('vv-compact', constrained && vv.height < window.innerHeight * 0.7);
@@ -15463,10 +15790,32 @@ function linkifyOutput(text) {
 }
 
 let peekSelecting = false;
+let _peekScrollLocked = false;
+
+function _isScrolledToBottom(el, threshold) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < (threshold || 40);
+}
+
+function _showScrollLockBadge(scrollEl, onClickResume) {
+  let badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.className = 'scroll-lock-badge';
+    badge.textContent = 'Scrolled up \u2014 click to resume';
+    badge.onclick = (e) => { e.stopPropagation(); onClickResume(); };
+    scrollEl.appendChild(badge);
+  }
+  badge.style.display = '';
+}
+
+function _hideScrollLockBadge(scrollEl) {
+  const badge = scrollEl.querySelector('.scroll-lock-badge');
+  if (badge) badge.style.display = 'none';
+}
+
 async function refreshPeek() {
   const name = peekSession;
   if (!name) return;
-  // Skip refresh while user is selecting text
   if (peekSelecting) return;
   const sel = window.getSelection();
   if (sel && sel.toString().length > 0) return;
@@ -15475,28 +15824,25 @@ async function refreshPeek() {
   try {
     const r = await fetch(API + '/api/sessions/' + name + '/peek?lines=500');
     const data = await r.json();
-    // Session changed while fetch was in flight — discard stale response
     if (peekSession !== name) return;
     const output = data.output || '(no output)';
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    // Anchor on distance-from-bottom, not scrollTop. Peek returns the
-    // tail of the buffer, so when new lines append, old lines roll off
-    // the top — every visible line shifts up by N. Preserving scrollTop
-    // would slide the user's reading position; preserving distance from
-    // the bottom keeps the same content under their eye.
-    const distFromBottom = body.scrollHeight - body.scrollTop - body.clientHeight;
+    const atBottom = _isScrolledToBottom(body);
+    if (atBottom) _peekScrollLocked = false;
     const newHTML = linkifyOutput(stripAnsi(output));
-    // Re-check: user may have started selecting text during the async fetch
     if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
-    // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
     const hasSearch = peekSearchQuery.trim().length > 0;
-    applyPeekSearch(hasSearch);  // keepIndex=true when search is active
-    if (atBottom && !hasSearch) {
+    applyPeekSearch(hasSearch);
+    if (!_peekScrollLocked && atBottom && !hasSearch) {
       body.scrollTop = body.scrollHeight;
-    } else {
-      body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight - distFromBottom);
+      _hideScrollLockBadge(body);
+    } else if (_peekScrollLocked) {
+      _showScrollLockBadge(body, () => {
+        _peekScrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
     }
     statusEl.textContent = (data.saved ? 'Saved log' : 'Updated') + ' ' + new Date().toLocaleTimeString();
     // Cache peek output for offline browsing
@@ -15742,6 +16088,22 @@ async function sendPeekCmd() {
   const text = inp.value.trim();
   const files = peekFiles.filter(f => f.path); // only successfully uploaded
   if (!text && files.length === 0) return;
+  // If session is actively working, ask whether to queue or send now
+  const sess = (sessions || []).find(s => s.name === peekSession);
+  if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
+    const choice = await _showSteerPrompt(text);
+    if (choice === 'queue') {
+      cmdHistoryAdd(text);
+      inp.value = '';
+      inp.style.height = 'auto';
+      delete _peekDrafts[peekSession];
+      await steerSession(peekSession, text);
+      return;
+    } else if (choice === 'cancel') {
+      return;
+    }
+    // choice === 'send' — fall through to normal send
+  }
   cmdHistoryAdd(text);
 
   // Build message: inline @path references (no newlines — tmux treats \n as Enter,
@@ -15785,6 +16147,40 @@ async function peekQuickKeys(keys) {
   setTimeout(refreshPeek, 500);
 }
 
+function _showSteerPrompt(text) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div');
+    bg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:400;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;max-width:400px;width:90%;box-shadow:0 12px 40px rgba(0,0,0,0.4);';
+    box.innerHTML = `<div style="font-weight:600;margin-bottom:8px;">Session is working</div>
+      <div style="font-size:0.85rem;color:var(--dim);margin-bottom:12px;">This session is actively running. How should your message be delivered?</div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:0.82rem;margin-bottom:16px;max-height:60px;overflow:hidden;word-break:break-word;">${text.length > 120 ? text.slice(0,120) + '…' : text}</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn" id="steer-cancel" style="font-size:0.82rem;">Cancel</button>
+        <button class="btn" id="steer-send-now" style="font-size:0.82rem;">Send now</button>
+        <button class="btn primary" id="steer-queue" style="font-size:0.82rem;">Queue for next turn</button>
+      </div>`;
+    bg.appendChild(box);
+    document.body.appendChild(bg);
+    const cleanup = (val) => { bg.remove(); resolve(val); };
+    box.querySelector('#steer-cancel').onclick = () => cleanup('cancel');
+    box.querySelector('#steer-send-now').onclick = () => cleanup('send');
+    box.querySelector('#steer-queue').onclick = () => cleanup('queue');
+    bg.onclick = (e) => { if (e.target === bg) cleanup('cancel'); };
+  });
+}
+async function steerSession(name, text) {
+  if (!text) return;
+  const r = await apiCall(API + '/api/sessions/' + encodeURIComponent(name) + '/steer', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text })
+  });
+  if (r) {
+    showToast('Steering queued — will deliver at next turn boundary');
+    _steeringUpdateBadge();
+  }
+}
 function peekDownloadLog() {
   if (!peekSession) return;
   const a = document.createElement('a');
@@ -16081,32 +16477,13 @@ function _atInsert(inp, el) {
 }
 
 // ── Slash command autocomplete ──
-const SLASH_COMMANDS = [
-  { cmd: '/compact', desc: 'Compact conversation history' },
-  { cmd: '/status', desc: 'Show session status' },
-  { cmd: '/cost', desc: 'Show token usage and cost' },
-  { cmd: '/clear', desc: 'Clear conversation history' },
-  { cmd: '/help', desc: 'Show available commands' },
-  { cmd: '/init', desc: 'Initialize project CLAUDE.md' },
-  { cmd: '/memory', desc: 'Edit CLAUDE.md memory' },
-  { cmd: '/model', desc: 'Switch model' },
-  { cmd: '/permissions', desc: 'View/manage permissions' },
-  { cmd: '/review', desc: 'Review a pull request' },
-  { cmd: '/terminal-setup', desc: 'Set up terminal integration' },
-  { cmd: '/vim', desc: 'Edit prompt in Vim' },
-  { cmd: '/bug', desc: 'Report a bug' },
-  { cmd: '/login', desc: 'Switch account or log in' },
-  { cmd: '/logout', desc: 'Log out of current account' },
-  { cmd: '/doctor', desc: 'Check installation health' },
-  { cmd: '/config', desc: 'Open config panel' },
-  { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
-  { cmd: '/amux-board', desc: 'Add a task or note to the board' },
-  { cmd: '/chrome-cdp', desc: 'Control live Chrome — screenshots, click, type, eval' },
-  { cmd: '/playwright-auth', desc: 'Capture and sync browser auth profiles' },
-  { cmd: '/pw-test', desc: 'Run Playwright UI tests or investigate issues' },
-  { cmd: '/record', desc: 'Record MP4 video of a browser task' },
-  { cmd: '/review-session-log', desc: 'Review a session terminal log' },
-];
+let SLASH_COMMANDS = [];
+(async function _loadSlashCommands() {
+  try {
+    const r = await fetch(API + '/api/slash-commands');
+    if (r.ok) SLASH_COMMANDS = await r.json();
+  } catch(e) {}
+})();
 
 // ── Customizable chip bar ──
 // Each chip: { id, label, action, value, danger? }
@@ -16128,9 +16505,7 @@ const DEFAULT_CHIPS = [
 ];
 
 // All possible chips the user can add
-const ALL_CHIPS = [
-  // Built-in actions
-  { section: 'Actions', items: [
+const _ACTION_CHIPS = [
     { id: 'continue', label: 'continue', action: 'send', value: 'continue', desc: 'Send "continue"' },
     { id: 'enter', label: 'Enter', action: 'keys', value: 'Enter', desc: 'Press Enter' },
     { id: 'up', label: '\u2191', action: 'keys', value: 'Up', desc: 'Arrow Up' },
@@ -16145,15 +16520,15 @@ const ALL_CHIPS = [
     { id: 'log', label: '\uD83D\uDCC4 Log', action: 'special', value: 'downloadLog', desc: 'Download terminal log' },
     { id: 'sendlog', label: '\uD83D\uDCE5 Load log', action: 'special', value: 'sendLog', desc: 'Tell the session to read its full ~/.amux/logs file as context' },
     { id: 'transcripts', label: '\uD83D\uDCBE Transcripts', action: 'special', value: 'showTranscripts', desc: 'Conversation transcripts' },
-  ]},
 ];
-// Add slash commands section from SLASH_COMMANDS
-ALL_CHIPS.push({
-  section: 'Slash Commands',
-  items: SLASH_COMMANDS.map(c => ({
-    id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
-  }))
-});
+function _getAllChips() {
+  return [
+    { section: 'Actions', items: _ACTION_CHIPS },
+    { section: 'Slash Commands', items: SLASH_COMMANDS.map(c => ({
+      id: c.cmd.slice(1), label: c.cmd, action: 'slash', value: c.cmd, desc: c.desc
+    })) },
+  ];
+}
 
 let _chipEditing = false;
 let _chipDragIdx = -1;
@@ -16184,7 +16559,12 @@ function _chipAction(chip, sessionName, isPeek) {
       const inp = document.getElementById('peek-cmd-input');
       if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); slashAcUpdate(); }
     } else {
-      chipToInput(sessionName, chip.value);
+      // Try card input first, then workspace pane input
+      const cardInp = document.getElementById('input-' + sessionName);
+      const gpInp = document.getElementById(_gpSafeId(sessionName) + '-input');
+      const inp = cardInp || gpInp;
+      if (inp) { inp.value = chip.value; inp.focus({ preventScroll: true }); autoGrow(inp); }
+      if (cardInp) cardSlashAcUpdate(sessionName);
     }
   } else if (chip.action === 'special') {
     if (chip.value === 'gitPush') gitPush(isPeek ? peekSession : sessionName, event);
@@ -16202,6 +16582,7 @@ function renderChips(container, sessionName, isPeek) {
     const drag = _chipEditing ? 'draggable="true"' : '';
     html += '<div class="' + cls + '" ' + drag + ' data-chip-idx="' + i + '"'
       + ' onclick="_chipAction(_getChips()[' + i + '],\'' + esc(sessionName || '') + '\',' + !!isPeek + ')">'
+      + (_chipEditing ? '<span class="chip-drag-handle">\u2630</span>' : '')
       + esc(chip.label)
       + (_chipEditing ? '<span class="chip-remove-btn" onclick="event.stopPropagation();removeChip(' + i + ')">\u00D7</span>' : '')
       + '</div>';
@@ -16246,6 +16627,51 @@ function _setupChipDrag(container) {
       _saveChips(chips);
       refreshAllChipBars();
     });
+    let _touchClone = null;
+    el.addEventListener('touchstart', e => {
+      _chipDragIdx = parseInt(el.dataset.chipIdx);
+      el.classList.add('dragging');
+      _touchClone = el.cloneNode(true);
+      _touchClone.style.cssText = 'position:fixed;pointer-events:none;z-index:9999;opacity:0.85;transform:scale(1.05);';
+      _touchClone.style.width = el.offsetWidth + 'px';
+      _touchClone.style.left = e.touches[0].clientX - el.offsetWidth / 2 + 'px';
+      _touchClone.style.top = e.touches[0].clientY - el.offsetHeight / 2 + 'px';
+      document.body.appendChild(_touchClone);
+      e.preventDefault();
+    }, {passive: false});
+    el.addEventListener('touchmove', e => {
+      if (_chipDragIdx < 0) return;
+      const t = e.touches[0];
+      if (_touchClone) {
+        _touchClone.style.left = t.clientX - el.offsetWidth / 2 + 'px';
+        _touchClone.style.top = t.clientY - el.offsetHeight / 2 + 'px';
+      }
+      container.querySelectorAll('.chip[data-chip-idx]').forEach(c => c.classList.remove('drag-over'));
+      const target = document.elementFromPoint(t.clientX, t.clientY);
+      const chipTarget = target && target.closest('.chip[data-chip-idx]');
+      if (chipTarget && chipTarget !== el) chipTarget.classList.add('drag-over');
+      e.preventDefault();
+    }, {passive: false});
+    el.addEventListener('touchend', e => {
+      if (_touchClone) { _touchClone.remove(); _touchClone = null; }
+      el.classList.remove('dragging');
+      container.querySelectorAll('.chip[data-chip-idx]').forEach(c => c.classList.remove('drag-over'));
+      if (_chipDragIdx < 0) return;
+      const ct = e.changedTouches[0];
+      const target = document.elementFromPoint(ct.clientX, ct.clientY);
+      const chipTarget = target && target.closest('.chip[data-chip-idx]');
+      if (chipTarget) {
+        const toIdx = parseInt(chipTarget.dataset.chipIdx);
+        if (toIdx !== _chipDragIdx) {
+          const chips = _getChips();
+          const [moved] = chips.splice(_chipDragIdx, 1);
+          chips.splice(toIdx, 0, moved);
+          _saveChips(chips);
+          refreshAllChipBars();
+        }
+      }
+      _chipDragIdx = -1;
+    });
   });
 }
 
@@ -16286,7 +16712,7 @@ function openChipPicker() {
       + '<span>' + esc(c.label) + '</span><span class="cpd">' + esc(c.value.length > 40 ? c.value.slice(0,40) + '...' : c.value) + '</span>'
       + '<span style="color:var(--dim);font-size:0.75rem;">\u2713</span></div>';
   });
-  ALL_CHIPS.forEach(sec => {
+  _getAllChips().forEach(sec => {
     html += '<div class="chip-picker-section">' + esc(sec.section) + '</div>';
     sec.items.forEach(item => {
       const added = existingIds.has(item.id);
@@ -16812,6 +17238,12 @@ function refreshAllChipBars() {
   document.querySelectorAll('.chips[id^="card-chips-"]').forEach(el => {
     const name = el.id.replace('card-chips-', '');
     if (name) renderChips(el, name, false);
+  });
+  // Refresh workspace grid pane chip bars
+  Object.keys(_gridPanes).forEach(name => {
+    const sid = _gpSafeId(name);
+    const el = document.getElementById(sid + '-chips');
+    if (el) renderChips(el, name, false);
   });
 }
 // Initialize peek chip bar now that renderChips is defined
@@ -18997,6 +19429,14 @@ function peekCheckSelection() {
 }
 document.getElementById('peek-body').addEventListener('mousedown', () => { peekSelecting = true; clearTimeout(peekSelectTimer); });
 document.getElementById('peek-body').addEventListener('touchstart', () => { peekSelecting = true; clearTimeout(peekSelectTimer); }, {passive: true});
+document.getElementById('peek-body').addEventListener('scroll', function() {
+  if (_isScrolledToBottom(this)) {
+    _peekScrollLocked = false;
+    _hideScrollLockBadge(this);
+  } else {
+    _peekScrollLocked = true;
+  }
+}, {passive: true});
 // Force URLs in peek output to open in the system browser (PWA desktop + mobile).
 // Handle both click (desktop) and touchend (iOS/Android) for reliability.
 function _peekOpenLink(e) {
@@ -22214,19 +22654,7 @@ function addGridPane(name, x, y, w, h) {
     '</div>' +
     '<div class="gp-body overlay-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
-      '<div class="chips">' +
-        '<div class="chip" onclick="doSend(\'' + safeName + '\',\'continue\')">continue</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Enter\')">Enter</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Up\')">&#x2191;</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'Down\')">&#x2193;</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/status\')">/status</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/model\')">/model</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/mcp\')">/mcp</div>' +
-        '<div class="chip danger" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl+C</div>' +
-        '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-o\')">Ctrl+O</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/clear\')">/clear</div>' +
-        '<div class="chip" onclick="gpChipToInput(\'' + safeName + '\',\'/compact\')">/compact</div>' +
-      '</div>' +
+      '<div class="chips" id="' + sid + '-chips"></div>' +
       '<div class="send-row">' +
         '<textarea class="send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
           ' oninput="autoGrow(this);cmdHistoryReset()"' +
@@ -22242,7 +22670,17 @@ function addGridPane(name, x, y, w, h) {
   if (gpBody) {
     gpBody.addEventListener('click', _peekOpenLink);
     gpBody.addEventListener('touchend', _peekOpenLink, {passive: false});
+    gpBody.addEventListener('scroll', function() {
+      if (_isScrolledToBottom(this)) {
+        this._scrollLocked = false;
+        _hideScrollLockBadge(this);
+      } else {
+        this._scrollLocked = true;
+      }
+    }, {passive: true});
   }
+  const gpChips = document.getElementById(sid + '-chips');
+  if (gpChips) renderChips(gpChips, name, false);
   _updateGridPane(name);
   _renderGridChips();
   _gridSaveLayout();
@@ -22265,9 +22703,19 @@ async function _updateGridPane(name) {
   if (!body) { removeGridPane(name); return; }
   try {
     const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
-    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    const atBottom = _isScrolledToBottom(body);
+    const locked = body._scrollLocked;
     body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
-    if (atBottom) body.scrollTop = body.scrollHeight;
+    if (!locked && atBottom) {
+      body.scrollTop = body.scrollHeight;
+      _hideScrollLockBadge(body);
+    } else if (locked) {
+      _showScrollLockBadge(body, () => {
+        body._scrollLocked = false;
+        body.scrollTop = body.scrollHeight;
+        _hideScrollLockBadge(body);
+      });
+    }
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
       dot.className = 'gp-dot' + (!s || !s.running ? '' : s.status === 'active' ? ' working' : s.status === 'waiting' ? ' waiting' : ' idle');
@@ -22432,10 +22880,15 @@ function _wsClosePresetMenu(e) {
 function wsApplyPreset(preset) {
   document.getElementById('ws-preset-menu')?.classList.remove('open');
   if (!_grid) return;
-  // Get active session pane names (or all sessions if none open)
   let names = Object.keys(_gridPanes);
   if (!names.length) {
-    names = (sessions || []).map(s => s.name);
+    if (preset === 'auto') {
+      // Auto: prefer running/active sessions, fall back to all
+      const running = (sessions || []).filter(s => s.running || s.status === 'active' || s.status === 'waiting');
+      names = running.length ? running.map(s => s.name) : (sessions || []).map(s => s.name);
+    } else {
+      names = (sessions || []).map(s => s.name);
+    }
   }
   if (!names.length) return;
 
@@ -22460,6 +22913,16 @@ function wsApplyPreset(preset) {
 function _wsCalcPreset(preset, count) {
   const items = [];
   switch (preset) {
+    case 'auto': {
+      const wide = window.innerWidth >= 1200;
+      const mid = window.innerWidth >= 800;
+      if (count === 1) return _wsCalcPreset('focus', count);
+      if (count === 2) return _wsCalcPreset(wide ? 'split' : 'focus', count);
+      if (count === 3) return _wsCalcPreset(wide ? 'tri' : mid ? 'main-side' : 'focus', count);
+      if (count <= 4) return _wsCalcPreset(wide ? 'grid-2x2' : mid ? 'split' : 'focus', count);
+      if (count <= 6) return _wsCalcPreset(wide ? 'tri' : 'split', count);
+      return _wsCalcPreset(wide ? 'tri' : 'split', count);
+    }
     case 'focus':
       // Single column, all stacked full-width
       for (let i = 0; i < count; i++)
@@ -22972,6 +23435,7 @@ function connectSSE() {
       } else if (msg.type === 'alerts') {
         for (const a of (msg.payload || [])) {
           _fireAmuxAlert(a);
+          if (a.type === 'steering_delivered' && a.session === peekSession) _steeringUpdateBadge();
         }
       } else if (msg.type === 'invalidate') {
         for (const key of (msg.keys || [])) {
@@ -23644,6 +24108,8 @@ function toggleSettings() {
   if (open) {
     _renderInstanceSwitcher();
     loadDefaultModel();
+    const zd = document.getElementById('zoom-level-display');
+    if (zd) zd.textContent = _zoomLevel + '%';
     // Apply cloud identity (email) or device name
     _applyIdentityToSettings();
     if (!_cloudEmail) {
@@ -28475,6 +28941,7 @@ async function _jrnlSaveConfig() {
     <div class="ws-preset-dropdown" id="ws-preset-dropdown">
       <button class="ws-preset-btn" onclick="wsTogglePresetMenu()" title="Apply a layout preset">&#x25A6; Layout</button>
       <div class="ws-preset-menu" id="ws-preset-menu">
+        <button onclick="wsApplyPreset('auto')"><span class="preset-icon">&#x2728;</span> Auto</button>
         <button onclick="wsApplyPreset('focus')"><span class="preset-icon">&#x25A0;</span> Focus (1 col)</button>
         <button onclick="wsApplyPreset('split')"><span class="preset-icon">&#x25EB;</span> Split (2 col)</button>
         <button onclick="wsApplyPreset('tri')"><span class="preset-icon">&#x2630;</span> 3 Columns</button>
@@ -29205,7 +29672,7 @@ class CCHandler(BaseHTTPRequestHandler):
 <meta name="viewport" content="width=device-width">
 <style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;font-size:1rem;}</style>
 </head><body>
-<div>Clearing cache\u2026</div>
+<div>Clearing cache&#8230;</div>
 <script>
 (async () => {
   if ('serviceWorker' in navigator) {
@@ -29876,6 +30343,10 @@ class CCHandler(BaseHTTPRequestHandler):
                                 hint = line.split(":", 1)[1].strip()
                 skills.append({"name": row["name"], "description": desc, "hint": hint})
             return self._json(skills)
+
+        if method == "GET" and path == "/api/slash-commands":
+            cmds = _get_slash_commands()
+            return self._json(cmds)
 
         # GET /api/skills/<name> — get full skill content
         if method == "GET" and path.startswith("/api/skills/"):
@@ -31977,9 +32448,18 @@ return output
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/send — send email via Mail.app
+            # POST /api/email/send — send email via Mail.app (new messages only, NOT replies)
             if method == "POST" and path == "/api/email/send":
                 body = self._read_body()
+                # Reject threading headers — Mail.app blocks custom headers on outgoing
+                # messages (-10024). Use /api/email/reply for threaded replies.
+                for forbidden_key in ("in_reply_to", "references", "inReplyTo"):
+                    if body.get(forbidden_key):
+                        return self._json({
+                            "error": f"'{forbidden_key}' is not supported on /api/email/send — "
+                                     "Mail.app cannot set custom headers on outgoing messages. "
+                                     "Use POST /api/email/reply to reply in-thread."
+                        }, 400)
                 to = body.get("to", "").strip()
                 subject = body.get("subject", "").strip()
                 message = body.get("body", "").strip()
@@ -31987,7 +32467,6 @@ return output
                 from_acct = body.get("from", "").strip()
                 if not to or not subject or not message:
                     return self._json({"error": "to, subject, and body are required"}, 400)
-                # Basic email validation
                 if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', to):
                     return self._json({"error": f"invalid email address: {to}"}, 400)
                 if cc and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', cc):
@@ -31995,8 +32474,8 @@ return output
                 cc_line = f'\nset cc of new_msg to "{cc}"' if cc else ""
                 subj_safe = subject.replace('"', '\\"')
                 to_safe = to.replace('"', '\\"')
-                body_safe = message.replace('"', '\\"').replace('\n', '\\n')
-                # If from account specified, set the sender
+                body_expr = _ascript_str(message)
+                expected_len = len(message)
                 from_line = ""
                 if from_acct:
                     from_safe = from_acct.replace('"', '\\"')
@@ -32011,67 +32490,274 @@ return output
         end repeat"""
                 script = f"""
 tell application "Mail"
-    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:"{body_safe}", visible:false}}
+    set bodyText to {body_expr}
+    set new_msg to make new outgoing message with properties {{subject:"{subj_safe}", content:bodyText, visible:false}}
     tell new_msg
         make new to recipient with properties {{address:"{to_safe}"}}
         {cc_line}
     end tell
     {from_line}
+    -- Verify content was actually applied before sending
+    set actualLen to length of (content of new_msg)
+    if actualLen < {expected_len} then
+        error "Content verification failed: expected {expected_len} chars, got " & actualLen & " chars. Aborting send."
+    end if
     send new_msg
+    return actualLen as string
 end tell
 """
                 try:
                     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
                     if r.returncode != 0:
                         return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "to": to, "subject": subject})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "to": to, "subject": subject,
+                                       "from": from_acct or "(default)", "cc": cc or None,
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
-            # POST /api/email/reply — reply to an existing email
+            # POST /api/email/reply — reply to an existing email in-thread
             if method == "POST" and path == "/api/email/reply":
                 body = self._read_body()
                 message_id = body.get("message_id", "").strip()
                 reply_body = body.get("body", "").strip()
                 reply_all = body.get("reply_all", False)
+                from_acct = body.get("from", "").strip()
                 if not message_id or not reply_body:
                     return self._json({"error": "message_id and body are required"}, 400)
                 msg_id_safe = message_id.replace('"', '\\"')
-                body_safe = reply_body.replace('"', '\\"').replace('\n', '\\n')
-                reply_cmd = "reply" if not reply_all else "reply with properties {reply to all: true}"
+                body_expr = _ascript_str(reply_body)
+                expected_len = len(reply_body)
+                reply_props = "reply to all: true" if reply_all else ""
+                reply_cmd = f"reply with properties {{{reply_props}}}" if reply_props else "reply"
+                from_block = ""
+                if from_acct:
+                    from_safe = from_acct.replace('"', '\\"')
+                    from_block = f"""
+    -- Set sender on reply
+    repeat with acct in accounts
+        repeat with addr in email addresses of acct
+            if address of addr is "{from_safe}" then
+                set sender of replyMsg to (address of addr as string)
+            end if
+        end repeat
+    end repeat"""
                 script = f"""
 tell application "Mail"
     set targetMsg to missing value
+    -- Search ALL mailboxes, not just INBOX
     repeat with acct in accounts
         try
             repeat with mb in mailboxes of acct
-                if name of mb is "INBOX" then
-                    set msgs to (messages of mb whose message id is "{msg_id_safe}")
-                    if (count of msgs) > 0 then
-                        set targetMsg to item 1 of msgs
-                        exit repeat
-                    end if
+                set msgs to (messages of mb whose message id is "{msg_id_safe}")
+                if (count of msgs) > 0 then
+                    set targetMsg to item 1 of msgs
+                    exit repeat
                 end if
             end repeat
         end try
         if targetMsg is not missing value then exit repeat
     end repeat
     if targetMsg is missing value then
-        error "Message not found"
+        error "Message not found in any mailbox"
     end if
     set replyMsg to {reply_cmd} targetMsg opening window no
-    set content of replyMsg to "{body_safe}" & return & return & (content of replyMsg)
+    delay 3
+    set replyBody to {body_expr}
+    set content of replyMsg to replyBody & linefeed & linefeed & (content of replyMsg)
+    {from_block}
+    -- Verify body was actually applied before sending
+    set finalContent to content of replyMsg
+    if not (finalContent starts with replyBody) then
+        error "Content verification failed: reply body was not applied. Aborting send."
+    end if
     send replyMsg
+    return (length of finalContent) as string
 end tell
 """
                 try:
-                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=30)
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
                     if r.returncode != 0:
                         err = r.stderr.strip()
                         if "Message not found" in err:
-                            return self._json({"error": "message not found — check message_id"}, 404)
+                            return self._json({"error": "message not found in any mailbox — check message_id"}, 404)
+                        if "Content verification failed" in err:
+                            return self._json({"error": err}, 500)
                         return self._json({"error": err or "AppleScript failed"}, 500)
-                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all})
+                    actual_len = r.stdout.strip()
+                    return self._json({"ok": True, "message_id": message_id, "reply_all": reply_all,
+                                       "from": from_acct or "(default)",
+                                       "body_length": int(actual_len) if actual_len.isdigit() else actual_len})
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "Mail.app timed out (60s) — message may be in a large mailbox"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/search?q=...&account=...&limit=...&days=...&mailbox=...
+            if method == "GET" and path == "/api/email/search":
+                qs = parse_qs(urlparse(self.path).query)
+                q = (qs.get("q", [""])[0]).strip()
+                account = (qs.get("account", [""])[0]).strip()
+                limit = min(int(qs.get("limit", ["20"])[0]), 100)
+                days = int(qs.get("days", ["30"])[0])
+                mailbox = (qs.get("mailbox", [""])[0]).strip()
+                if not q:
+                    return self._json({"error": "q parameter is required"}, 400)
+                q_safe = q.replace('"', '\\"')
+                acct_filter = ""
+                if account:
+                    acct_safe = account.replace('"', '\\"')
+                    acct_filter = f'whose address of email addresses contains "{acct_safe}"'
+                # Default to INBOX only (fast). Use mailbox=all for exhaustive search.
+                if mailbox and mailbox.lower() == "all":
+                    mb_filter = "true"
+                elif mailbox:
+                    mb_safe = mailbox.replace('"', '\\"')
+                    mb_filter = f'name of mb is "{mb_safe}"'
+                else:
+                    mb_filter = 'name of mb is "INBOX"'
+                script = f"""
+set output to ""
+set matchCount to 0
+set maxResults to {limit}
+set cutoff to (current date) - ({days} * days)
+tell application "Mail"
+    repeat with acct in (accounts {acct_filter})
+        try
+            repeat with mb in mailboxes of acct
+                if {mb_filter} then
+                    try
+                        set msgs to (messages of mb whose (subject contains "{q_safe}" or sender contains "{q_safe}") and date received > cutoff)
+                        repeat with msg in msgs
+                            if matchCount >= maxResults then exit repeat
+                            set mid to message id of msg
+                            set msubj to subject of msg
+                            set mfrom to sender of msg
+                            set mto to ""
+                            try
+                                set mto to address of to recipient 1 of msg
+                            end try
+                            set mdate to date received of msg as string
+                            set mbox to name of mb
+                            set macct to name of acct
+                            set mbody to ""
+                            try
+                                set mbody to content of msg
+                                if (length of mbody) > 200 then set mbody to text 1 thru 200 of mbody
+                            end try
+                            set output to output & mid & "\\t" & msubj & "\\t" & mfrom & "\\t" & mto & "\\t" & mdate & "\\t" & mbox & "\\t" & macct & "\\t" & mbody & linefeed
+                            set matchCount to matchCount + 1
+                        end repeat
+                    end try
+                end if
+                if matchCount >= maxResults then exit repeat
+            end repeat
+        end try
+        if matchCount >= maxResults then exit repeat
+    end repeat
+end tell
+return output
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    results = []
+                    for line in r.stdout.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        parts = line.split("\t")
+                        if len(parts) >= 7:
+                            results.append({
+                                "message_id": parts[0],
+                                "subject": parts[1],
+                                "from": parts[2],
+                                "to": parts[3],
+                                "date": parts[4],
+                                "mailbox": parts[5],
+                                "account": parts[6],
+                                "snippet": parts[7] if len(parts) > 7 else "",
+                            })
+                    return self._json(results)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "search timed out (120s)"}, 504)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # GET /api/email/message/<rfc822_message_id>
+            if method == "GET" and path.startswith("/api/email/message/"):
+                raw_mid = path[len("/api/email/message/"):]
+                mid = unquote(raw_mid).strip()
+                if not mid:
+                    return self._json({"error": "message_id is required"}, 400)
+                mid_safe = mid.replace('"', '\\"')
+                script = f"""
+set output to ""
+tell application "Mail"
+    repeat with acct in accounts
+        try
+            repeat with mb in mailboxes of acct
+                try
+                    set msgs to (messages of mb whose message id is "{mid_safe}")
+                    if (count of msgs) > 0 then
+                        set msg to item 1 of msgs
+                        set msubj to subject of msg
+                        set mfrom to sender of msg
+                        set mto to ""
+                        repeat with r in to recipients of msg
+                            set mto to mto & address of r & ","
+                        end repeat
+                        set mcc to ""
+                        try
+                            repeat with r in cc recipients of msg
+                                set mcc to mcc & address of r & ","
+                            end repeat
+                        end try
+                        set mdate to date received of msg as string
+                        set mbox to name of mb
+                        set macct to name of acct
+                        set mbody to content of msg
+                        set mirt to ""
+                        try
+                            set hdrs to headers of msg
+                            repeat with h in hdrs
+                                if name of h is "In-Reply-To" then set mirt to content of h
+                                if name of h is "References" then
+                                    set output to output & "references\\t" & content of h & linefeed
+                                end if
+                            end repeat
+                        end try
+                        set output to "found" & linefeed & "subject\\t" & msubj & linefeed & "from\\t" & mfrom & linefeed & "to\\t" & mto & linefeed & "cc\\t" & mcc & linefeed & "date\\t" & mdate & linefeed & "mailbox\\t" & mbox & linefeed & "account\\t" & macct & linefeed & "in_reply_to\\t" & mirt & linefeed & output & "body\\t" & mbody
+                        return output
+                    end if
+                end try
+            end repeat
+        end try
+    end repeat
+end tell
+return "not_found"
+"""
+                try:
+                    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+                    if r.returncode != 0:
+                        return self._json({"error": r.stderr.strip() or "AppleScript failed"}, 500)
+                    raw = r.stdout.strip()
+                    if raw == "not_found" or not raw.startswith("found"):
+                        return self._json({"error": "message not found"}, 404)
+                    result = {}
+                    for line in raw.split("\n"):
+                        if "\t" in line:
+                            key, _, val = line.partition("\t")
+                            key = key.strip()
+                            if key == "found":
+                                continue
+                            if key == "to" or key == "cc":
+                                val = [a.strip() for a in val.split(",") if a.strip()]
+                            result[key] = val
+                    return self._json(result)
+                except subprocess.TimeoutExpired:
+                    return self._json({"error": "timed out (60s)"}, 504)
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
@@ -33393,6 +34079,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _ensure_memory(name, wd)
                 content = mem_file.read_text(errors="replace") if mem_file.exists() else ""
                 return self._json({"content": content, "path": str(mem_file)})
+            if action == "steer":
+                with _steering_lock:
+                    queue = list(_steering_queue.get(name, []))
+                return self._json(queue)
             return self._json({"error": "not found"}, 404)
 
         if action == "tracked-files" and method in ("POST", "DELETE"):
@@ -33414,6 +34104,31 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
             meta["tracked_files"] = tracked
             _save_meta(name, meta)
             return self._json({"ok": True, "files": tracked})
+
+        if action == "steer":
+            if method == "DELETE":
+                body = self._read_body()
+                msg_id = body.get("id", "")
+                with _steering_lock:
+                    if msg_id:
+                        q = _steering_queue.get(name, [])
+                        _steering_queue[name] = [m for m in q if m["id"] != msg_id]
+                        removed = len(q) - len(_steering_queue[name])
+                    else:
+                        removed = len(_steering_queue.get(name, []))
+                        _steering_queue[name] = []
+                return self._json({"ok": True, "cleared": removed})
+            if method == "POST":
+                body = self._read_body()
+                text = body.get("text", "")
+                if not text:
+                    return self._json({"error": "missing 'text'"}, 400)
+                msg_id = f"steer-{int(time.time()*1000)}"
+                entry = {"id": msg_id, "text": text, "queued_at": time.time()}
+                with _steering_lock:
+                    _steering_queue.setdefault(name, []).append(entry)
+                return self._json({"ok": True, "id": msg_id, "message": "queued for next turn boundary"})
+            return self._json({"error": "method not allowed"}, 405)
 
         if method == "POST":
             if action == "transcripts":
@@ -33771,16 +34486,35 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                         flags = flags_no_model
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
-                    # Also send /model to running session so it takes effect immediately
-                    if is_running(name) and model_val:
+                    # Auto-restart the session so the new --model takes effect.
+                    # In-place /model switching via tmux send-keys is unreliable
+                    # (input gets eaten when the session is showing a prompt or
+                    # busy). Restart kills in-flight work but preserves the
+                    # conversation — next start uses --resume <conv-id>.
+                    restarted = False
+                    if is_running(name):
                         try:
-                            subprocess.run(
-                                ["tmux", "send-keys", "-t", tmux_target(name), f"/model {model_val}", "Enter"],
-                                capture_output=True, timeout=5,
-                            )
+                            # Capture the LIVE conversation id BEFORE killing
+                            # the tmux session. The stored meta value can be
+                            # stale (e.g. when a session is removed and re-
+                            # registered with the same name) — the running
+                            # process's argv/open-fds + the work_dir's most-
+                            # recent jsonl are authoritative for what
+                            # conversation is actually being used.
+                            work_dir_pre = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
+                            conv_id = _live_conv_id(name, work_dir_pre)
+                            if conv_id:
+                                meta_pre = _load_meta(name)
+                                if meta_pre.get("cc_conversation_id") != conv_id:
+                                    meta_pre["cc_conversation_id"] = conv_id
+                                    _save_meta(name, meta_pre)
+                            stop_session(name)
+                            ok_r, _ = start_session(name)
+                            restarted = bool(ok_r)
                         except Exception:
                             pass
-                    return self._json({"ok": True, "message": f"model set to {model_val}"})
+                    suffix = " (session restarted)" if restarted else ""
+                    return self._json({"ok": True, "message": f"model set to {model_val}{suffix}"})
 
                 # Toggle YOLO
                 if body.get("toggle_yolo"):
