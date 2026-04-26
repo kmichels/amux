@@ -10482,6 +10482,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
   <!-- Toolbar -->
   <div class="fe-toolbar">
+    <button class="fe-tb-btn" id="files-back-session-btn" onclick="closeExplore()" title="Return to session" style="display:none;background:var(--purple,#8957e5);color:#fff;border-color:var(--purple,#8957e5);font-size:0.72rem;white-space:nowrap;gap:4px;font-weight:600;">
+      &#x2190; <span id="files-back-session-label">Back</span>
+    </button>
     <button class="fe-tb-btn" id="files-up-btn" onclick="loadFiles(_filesLastData?.data?.parent||'/')" title="Go up">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 10V2M2 6l4-4 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
@@ -16095,7 +16098,7 @@ async function sendPeekCmd() {
   if (sess && sess.status === 'active' && files.length === 0 && !text.startsWith('/')) {
     const choice = await _showSteerPrompt(text);
     if (choice === 'queue') {
-      cmdHistoryAdd(text);
+      cmdHistoryAdd(text, {type:'steering'});
       inp.value = '';
       inp.style.height = 'auto';
       delete _peekDrafts[peekSession];
@@ -17347,10 +17350,12 @@ let _cmdHistory = JSON.parse(localStorage.getItem('amux_cmd_history') || '[]');
 let _cmdHistoryIdx = -1;   // -1 = not browsing history
 let _cmdHistoryDraft = ''; // saved current input when starting to browse
 
-function cmdHistoryAdd(text) {
+function cmdHistoryAdd(text, opts) {
   if (!text.trim()) return;
-  if (_cmdHistory.length && _cmdHistory[_cmdHistory.length - 1] === text) { _cmdHistoryIdx = -1; return; }
-  _cmdHistory.push(text);
+  const entry = { text, type: (opts && opts.type) || 'direct', session: (opts && opts.session) || peekSession || '', time: Date.now() };
+  const prev = _cmdHistory[_cmdHistory.length - 1];
+  if (prev && (typeof prev === 'string' ? prev : prev.text) === text) { _cmdHistoryIdx = -1; return; }
+  _cmdHistory.push(entry);
   if (_cmdHistory.length > 500) _cmdHistory = _cmdHistory.slice(-500);
   localStorage.setItem('amux_cmd_history', JSON.stringify(_cmdHistory));
   _cmdHistoryIdx = -1;
@@ -17374,23 +17379,34 @@ function _renderCmdHistoryList(filter) {
   const list = document.getElementById('cmd-history-list');
   if (!list) return;
   const q = (filter || '').trim().toLowerCase();
-  // newest first, dedupe consecutive duplicates already handled at add time
   const items = _cmdHistory.slice().reverse();
-  const filtered = q ? items.filter(t => t.toLowerCase().includes(q)) : items;
+  const filtered = q ? items.filter(e => { const t = typeof e === 'string' ? e : e.text; return t.toLowerCase().includes(q); }) : items;
   if (!filtered.length) {
     list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:20px;text-align:center;">'
       + (q ? 'No matches.' : 'No history yet.') + '</div>';
     return;
   }
-  list.innerHTML = filtered.map(t => {
-    const safe = t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    const enc = encodeURIComponent(t);
+  list.innerHTML = filtered.map(e => {
+    const text = typeof e === 'string' ? e : e.text;
+    const type = typeof e === 'string' ? '' : (e.type || '');
+    const session = typeof e === 'string' ? '' : (e.session || '');
+    const ts = typeof e === 'string' ? '' : (e.time ? new Date(e.time).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '');
+    const safe = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const enc = encodeURIComponent(text);
+    const tagColor = type === 'steering' ? 'var(--purple,#8957e5)' : 'var(--dim)';
+    const tagBg = type === 'steering' ? 'rgba(137,87,229,0.15)' : 'rgba(128,128,128,0.1)';
+    const tagLabel = type === 'steering' ? 'queued' : 'direct';
+    const meta = (type ? '<span style="display:inline-block;font-size:0.7rem;padding:1px 6px;border-radius:3px;background:' + tagBg + ';color:' + tagColor + ';margin-right:6px;">' + tagLabel + '</span>' : '')
+      + (session ? '<span style="color:var(--dim);font-size:0.7rem;margin-right:6px;">' + session.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>' : '')
+      + (ts ? '<span style="color:var(--dim);font-size:0.7rem;">' + ts + '</span>' : '');
     return '<div onclick="_pickCmdHistory(decodeURIComponent(\u0027' + enc + '\u0027))" '
       + 'style="cursor:pointer;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;'
       + 'font-size:0.85rem;color:var(--text);white-space:pre-wrap;word-break:break-word;line-height:1.45;'
       + 'transition:border-color 0.15s;" '
       + 'onmouseenter="this.style.borderColor=\u0027var(--accent)\u0027" '
-      + 'onmouseleave="this.style.borderColor=\u0027var(--border)\u0027">' + safe + '</div>';
+      + 'onmouseleave="this.style.borderColor=\u0027var(--border)\u0027">'
+      + (meta ? '<div style="margin-bottom:4px;">' + meta + '</div>' : '')
+      + safe + '</div>';
   }).join('');
 }
 function _pickCmdHistory(text) {
@@ -17408,14 +17424,15 @@ function cmdHistoryUp(inp) {
   if (!_cmdHistory.length) return;
   if (_cmdHistoryIdx === -1) { _cmdHistoryDraft = inp.value; _cmdHistoryIdx = _cmdHistory.length - 1; }
   else if (_cmdHistoryIdx > 0) { _cmdHistoryIdx--; }
-  inp.value = _cmdHistory[_cmdHistoryIdx];
+  const e = _cmdHistory[_cmdHistoryIdx];
+  inp.value = typeof e === 'string' ? e : e.text;
   autoGrow(inp);
   requestAnimationFrame(() => { inp.selectionStart = inp.selectionEnd = inp.value.length; });
 }
 
 function cmdHistoryDown(inp) {
   if (_cmdHistoryIdx === -1) return;
-  if (_cmdHistoryIdx < _cmdHistory.length - 1) { _cmdHistoryIdx++; inp.value = _cmdHistory[_cmdHistoryIdx]; }
+  if (_cmdHistoryIdx < _cmdHistory.length - 1) { _cmdHistoryIdx++; const e = _cmdHistory[_cmdHistoryIdx]; inp.value = typeof e === 'string' ? e : e.text; }
   else { _cmdHistoryIdx = -1; inp.value = _cmdHistoryDraft; }
   autoGrow(inp);
   requestAnimationFrame(() => { inp.selectionStart = inp.selectionEnd = inp.value.length; });
@@ -18610,10 +18627,14 @@ function _updateFilesSessionBtn() {
   const lbl = document.getElementById('files-set-session-label');
   const oitem = document.getElementById('files-session-oitem');
   const olbl = document.getElementById('files-session-oitem-label');
+  const backBtn = document.getElementById('files-back-session-btn');
+  const backLbl = document.getElementById('files-back-session-label');
   const show = !!_exploreSession;
   if (btn) btn.style.display = show ? 'inline-flex' : 'none';
   if (lbl && _exploreSession) lbl.textContent = 'Set dir for ' + _exploreSession;
   if (oitem) oitem.style.display = show ? 'flex' : 'none';
+  if (backBtn) backBtn.style.display = show ? 'inline-flex' : 'none';
+  if (backLbl && _exploreSession) backLbl.textContent = _exploreSession;
   if (olbl && _exploreSession) olbl.textContent = 'Set dir for ' + _exploreSession;
 }
 async function setFilesSessionDir() {
