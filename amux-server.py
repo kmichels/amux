@@ -1498,10 +1498,14 @@ def _claude_ui_visible(clean_output: str) -> bool:
         ls = l.strip().lower()
         if "\u23f5\u23f5" in l or "bypass permissions" in ls or "plan mode" in ls:
             return True
-    # Check last 12 lines for an active spinner (dingbat + ellipsis)
+    # Check last 12 lines for an active spinner (dingbat-prefixed status line
+    # like "\u273b Crunched for 1m 38s"). Exclude U+276F \u276f \u2014 that's Claude's input
+    # prompt, also the user's typed input in scrollback. After /exit, lines
+    # like "\u276f /exit" stay in scrollback within this 12-line window and were
+    # tripping a false positive that made is_running() return True forever.
     for l in lines[-12:]:
         s = l.strip()
-        if s and "\u2700" <= s[0] <= "\u27bf":
+        if s and "\u2700" <= s[0] <= "\u27bf" and s[0] != "\u276f":
             return True
     return False
 
