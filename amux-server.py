@@ -14173,11 +14173,14 @@ async function doRestart(name) {
     // stop_session keeps tmux alive. /info uses is_running() which correctly
     // returns false once Claude exits.
     // Worst case server-side stop is ~21s (rename + 15s exit + 1s settle), so
-    // poll for 30s with a 1s warmup before the first poll.
+    // poll for 30s with a 1s warmup before the first poll. Use a wall-clock
+    // deadline rather than an iteration count: with a 3s per-poll timeout,
+    // a fixed 60-iter loop would actually run for >3 minutes if the network
+    // is hanging.
     await new Promise(r => setTimeout(r, 1000));
     let stopped = false;
-    const MAX_POLLS = 58; // 1s warmup + 58 * 500ms ≈ 30s total
-    for (let i = 0; i < MAX_POLLS; i++) {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
       try {
         const r = await _fetchTimeout(INFO_URL, 3000);
         if (r.status === 404) {
@@ -14191,6 +14194,7 @@ async function doRestart(name) {
       } catch (e) {
         // Network blip — keep polling.
       }
+      if (Date.now() >= deadline) break;
       await new Promise(r => setTimeout(r, 500));
     }
     if (!stopped) {
