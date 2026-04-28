@@ -14115,6 +14115,17 @@ async function copyMoshCmd(name) {
 // can't pile up overlapping polling loops + queued /start commands.
 const _restartingSessions = new Set();
 
+// fetch() with a hard timeout, so a hanging network request can't trap the
+// caller inside an await. Using AbortController + setTimeout instead of
+// AbortSignal.timeout() for broader Safari/iOS compat (AbortSignal.timeout
+// is Safari 16+; AbortController is universal). Aborts surface as a
+// DOMException, which the caller's try/catch handles like any network error.
+function _fetchTimeout(url, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { signal: ctl.signal }).finally(() => clearTimeout(t));
+}
+
 async function doRestart(name) {
   if (_restartingSessions.has(name)) {
     showToast('Restart already in progress');
@@ -14134,7 +14145,7 @@ async function doRestart(name) {
     let alreadyStopped = false;
     let sessionGone = false;
     try {
-      const pre = await fetch(INFO_URL, { signal: AbortSignal.timeout(5000) });
+      const pre = await _fetchTimeout(INFO_URL, 5000);
       if (pre.status === 404) {
         sessionGone = true;
       } else if (pre.ok) {
@@ -14168,7 +14179,7 @@ async function doRestart(name) {
     const MAX_POLLS = 58; // 1s warmup + 58 * 500ms ≈ 30s total
     for (let i = 0; i < MAX_POLLS; i++) {
       try {
-        const r = await fetch(INFO_URL, { signal: AbortSignal.timeout(3000) });
+        const r = await _fetchTimeout(INFO_URL, 3000);
         if (r.status === 404) {
           showToast('Session no longer exists');
           return;
